@@ -12,7 +12,9 @@ from urllib.parse import quote
 from pydantic import BaseModel, Field
 
 from services import imported_sources
-from services.generator_registry import WORKSPACE_DIR
+# Import the module (not the name) so WORKSPACE_DIR is read at call time: the
+# settings endpoint rebinds it when the user moves the workspace.
+import services.generator_registry as registry
 from services.mesh_ops import (
     MeshOpContext,
     MeshOpExecutionError,
@@ -53,8 +55,8 @@ def _resolve_input_path(raw_path: str) -> Path:
             raise HTTPException(404, f"File not found: {raw_path}")
         return resolved
 
-    resolved = (WORKSPACE_DIR / raw_path).resolve()
-    if not str(resolved).startswith(str(WORKSPACE_DIR.resolve())):
+    resolved = (registry.WORKSPACE_DIR / raw_path).resolve()
+    if not str(resolved).startswith(str(registry.WORKSPACE_DIR.resolve())):
         raise HTTPException(400, "Invalid path")
     if not resolved.exists():
         raise HTTPException(404, f"File not found: {raw_path}")
@@ -62,12 +64,12 @@ def _resolve_input_path(raw_path: str) -> Path:
 
 
 def _operation_output_path(input_path: Path, output_name: str) -> Path:
-    workspace = WORKSPACE_DIR.resolve()
+    workspace = registry.WORKSPACE_DIR.resolve()
     resolved_input = input_path.resolve()
     output_dir = (
         input_path.parent
         if resolved_input == workspace or workspace in resolved_input.parents
-        else WORKSPACE_DIR / "Workflows"
+        else registry.WORKSPACE_DIR / "Workflows"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir / output_name
@@ -81,7 +83,7 @@ def _run_operation(
     preserve_visuals: bool = False,
 ) -> MeshOpResult:
     context = MeshOpContext(
-        workspace_dir=WORKSPACE_DIR,
+        workspace_dir=registry.WORKSPACE_DIR,
         temp_dir=Path(tempfile.gettempdir()),
         output_path=output_path,
         preserve_visuals=preserve_visuals,
@@ -101,7 +103,7 @@ def _run_operation(
 def _operation_response(result: MeshOpResult) -> dict[str, object]:
     output_path = result.file_path.resolve()
     try:
-        relative_path = output_path.relative_to(WORKSPACE_DIR.resolve()).as_posix()
+        relative_path = output_path.relative_to(registry.WORKSPACE_DIR.resolve()).as_posix()
     except ValueError:
         payload: dict[str, object] = {"path": str(output_path)}
     else:
@@ -187,12 +189,12 @@ def transform_mesh(body: TransformRequest):
 
     stem = input_path.stem
     output_name = f"{stem}_xf_{uuid.uuid4().hex[:8]}.glb"
-    output_dir = input_path.parent if str(input_path).startswith(str(WORKSPACE_DIR.resolve())) else WORKSPACE_DIR / "Workflows"
+    output_dir = input_path.parent if str(input_path).startswith(str(registry.WORKSPACE_DIR.resolve())) else registry.WORKSPACE_DIR / "Workflows"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / output_name
     loaded.export(str(output_path))
 
-    rel = output_path.relative_to(WORKSPACE_DIR).as_posix()
+    rel = output_path.relative_to(registry.WORKSPACE_DIR).as_posix()
     return {"url": f"/workspace/{rel}"}
 
 
@@ -408,8 +410,8 @@ def export_mesh(path: str, format: str):
     if format not in ("obj", "stl", "ply"):
         raise HTTPException(400, "Supported formats: obj, stl, ply")
 
-    input_path = (WORKSPACE_DIR / path).resolve()
-    if not str(input_path).startswith(str(WORKSPACE_DIR.resolve())):
+    input_path = (registry.WORKSPACE_DIR / path).resolve()
+    if not str(input_path).startswith(str(registry.WORKSPACE_DIR.resolve())):
         raise HTTPException(400, "Invalid path")
     if not input_path.exists():
         raise HTTPException(404, f"File not found: {path}")

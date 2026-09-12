@@ -33,8 +33,8 @@ class ExportForSlicerTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.workspace = Path(self._tmp.name).resolve()
-        self._orig_workspace = export_router.WORKSPACE_DIR
-        export_router.WORKSPACE_DIR = self.workspace
+        self._orig_workspace = export_router.registry.WORKSPACE_DIR
+        export_router.registry.WORKSPACE_DIR = self.workspace
         # A box that is tallest along Y (glTF up-axis) and unit-sized, matching
         # what image-to-3D generators emit. Exported to GLB, it reloads as a
         # Scene so the flatten path is exercised too.
@@ -44,7 +44,7 @@ class ExportForSlicerTests(unittest.TestCase):
         box.export(str(self.workspace / self.rel))
 
     def tearDown(self) -> None:
-        export_router.WORKSPACE_DIR = self._orig_workspace
+        export_router.registry.WORKSPACE_DIR = self._orig_workspace
         self._tmp.cleanup()
 
     def test_converts_glb_to_stl_with_download_filename(self) -> None:
@@ -154,17 +154,17 @@ class ImportedSourceSlicerTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.outside = Path(self._tmp.name).resolve()
-        self._orig_workspace = export_router.WORKSPACE_DIR
+        self._orig_workspace = export_router.registry.WORKSPACE_DIR
         # A workspace elsewhere, so nothing here is reachable as a relative path.
         self._ws_tmp = tempfile.TemporaryDirectory()
-        export_router.WORKSPACE_DIR = Path(self._ws_tmp.name).resolve()
+        export_router.registry.WORKSPACE_DIR = Path(self._ws_tmp.name).resolve()
         imported_sources.clear()
         # Unit-sized and tallest along Y, as a glTF export would be.
         self.mesh_path = self.outside / "imported.glb"
         trimesh.creation.box(extents=[0.3, 1.0, 0.3]).export(str(self.mesh_path))
 
     def tearDown(self) -> None:
-        export_router.WORKSPACE_DIR = self._orig_workspace
+        export_router.registry.WORKSPACE_DIR = self._orig_workspace
         imported_sources.clear()
         self._tmp.cleanup()
         self._ws_tmp.cleanup()
