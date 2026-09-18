@@ -119,10 +119,14 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
       listDownloaded: () => ipcRenderer.invoke('model:listDownloaded'),
       isDownloaded:   (modelId: string) => ipcRenderer.invoke('model:isDownloaded', modelId),
       hasLocalData:    (modelId: string) => ipcRenderer.invoke('model:hasLocalData', modelId),
-      download:       (modelId: string) => ipcRenderer.invoke('model:download', modelId),
+      download:       (modelId: string, variantId?: string) => (variantId === undefined
+        ? ipcRenderer.invoke('model:download', modelId)
+        : ipcRenderer.invoke('model:download', modelId, variantId)),
       pauseDownload:  (modelId: string) => ipcRenderer.invoke('model:pauseDownload', modelId),
       cancelDownload: (modelId: string) => ipcRenderer.invoke('model:cancelDownload', modelId),
       delete:         (modelId: string) => ipcRenderer.invoke('model:delete', modelId),
+      installedWeightVariants: (modelId: string) => ipcRenderer.invoke('model:installedWeightVariants', modelId),
+      deleteWeightVariant: (modelId: string, variantId: string) => ipcRenderer.invoke('model:deleteWeightVariant', modelId, variantId),
       unloadAll:      () => ipcRenderer.invoke('model:unloadAll'),
       showInFolder:   (modelId: string) => ipcRenderer.invoke('model:showInFolder', modelId),
       activeDownloads: (): Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]> =>

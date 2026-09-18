@@ -14,12 +14,16 @@ import {
   listDownloadedModels,
   downloadModelFromHF,
   downloadModelSourcesFromHF,
+  type DownloadProgress,
 } from './model-downloader'
-import { resolveInstalledModelDownloadPlan } from './model-download-plan'
+import { legacyDownloadSteps, resolveInstalledModelDownloadPlan } from './model-download-plan'
 import {
   areModelSourcesDownloaded,
+  installedWeightVariants,
+  listWeightVariantFiles,
   modelHasLocalData,
   normalizeModelSources,
+  normalizeWeightVariants,
   removePartialDownloadArtifacts,
   resolveModelRoot,
 } from './model-sources'
@@ -149,11 +153,29 @@ const renameWithRetry = (from: string, to: string, label: string) =>
 
 export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGetter): void {
   type ActiveDownload = {
-    progress: { percent: number; file?: string; fileIndex?: number; totalFiles?: number }
+    progress: DownloadProgress & { variantId?: string }
     done: Promise<void>
     finish: () => void
   }
   const activeDownloads = new Map<string, ActiveDownload>()
+  const resolveModelPlan = (modelId: unknown) => resolveInstalledModelDownloadPlan({
+    modelId,
+    userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+    builtinExtensionsDir: getBuiltinExtensionsDir(),
+    blockedExtensionIds: activeExtensionInstalls,
+  })
+  const LOCKED_MODEL_FILES_ERROR = 'Model files are still locked after several attempts. Close any programs using the model and try again.'
+
+  // Unload and wait for confirmation so file handles are released before removal.
+  async function unloadModelBeforeRemoval(modelId: string): Promise<void> {
+    try {
+      await axios.post(`${API_BASE_URL}/model/unload/${encodeURIComponent(modelId)}`, {}, { timeout: 10_000 })
+      // Give the OS a moment to release file locks (Windows holds handles briefly after close)
+      await new Promise(resolve => setTimeout(resolve, 1_500))
+    } catch {
+      // Unload failed (model may not be loaded) — still attempt deletion
+    }
+  }
   // Logging from renderer
   ipcMain.on('log:error', (_event, message: string) => logger.error(`[Renderer] ${message}`))
   ipcMain.handle('log:getPath', () => join(app.getPath('userData'), 'logs', 'modly.log'))
@@ -339,35 +361,45 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
     let modelDir: string
     try {
-      await resolveInstalledModelDownloadPlan({
-        modelId,
-        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
-        builtinExtensionsDir: getBuiltinExtensionsDir(),
-        blockedExtensionIds: activeExtensionInstalls,
-      })
+      await resolveModelPlan(modelId)
       modelDir = resolveModelRoot(getSettings(app.getPath('userData')).modelsDir, modelId)
     } catch (err) {
       return { success: false, error: String(err) }
     }
 
-    // Unload the model and wait for confirmation so file handles are released
-    try {
-      await axios.post(`${API_BASE_URL}/model/unload/${encodeURIComponent(modelId)}`, {}, { timeout: 10_000 })
-      // Give the OS a moment to release file locks (Windows holds handles briefly after close)
-      await new Promise(resolve => setTimeout(resolve, 1_500))
-    } catch {
-      // Unload failed (model may not be loaded) — still attempt deletion
-    }
+    await unloadModelBeforeRemoval(modelId)
 
     // Retry removal — Windows may return EBUSY/EPERM if handles linger
     const removed = await rmWithRetry(modelDir, 'model-delete')
     if (removed.ok) return { success: true }
-    return {
-      success: false,
-      error: removed.locked
-        ? 'Model files are still locked after several attempts. Close any programs using the model and try again.'
-        : String(removed.error),
+    return { success: false, error: removed.locked ? LOCKED_MODEL_FILES_ERROR : String(removed.error) }
+  })
+
+  ipcMain.handle('model:deleteWeightVariant', async (_, modelId: string, variantId: string): Promise<{ success: boolean; error?: string }> => {
+    if (activeDownloads.has(modelId)) {
+      return { success: false, error: 'Cannot remove model weights while their download is active' }
     }
+    let files: string[]
+    try {
+      const plan = await resolveModelPlan(modelId)
+      const variant = plan.kind === 'legacy'
+        ? plan.weightVariants?.options.find((option) => option.id === variantId)
+        : undefined
+      if (!variant) throw new Error(`Model node "${modelId}" has no weight variant "${String(variantId)}"`)
+      files = await listWeightVariantFiles(getSettings(app.getPath('userData')).modelsDir, modelId, variant)
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+    if (files.length === 0) return { success: true }
+
+    await unloadModelBeforeRemoval(modelId)
+    for (const file of files) {
+      const removed = await rmWithRetry(file, 'model-variant-delete')
+      if (!removed.ok) {
+        return { success: false, error: removed.locked ? LOCKED_MODEL_FILES_ERROR : String(removed.error) }
+      }
+    }
+    return { success: true }
   })
 
   ipcMain.handle('model:showInFolder', (_, modelId: string) => {
@@ -403,28 +435,31 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('model:isDownloaded', async (_, modelId: string): Promise<boolean> => {
     const modelsDir = getSettings(app.getPath('userData')).modelsDir
     try {
-      const plan = await resolveInstalledModelDownloadPlan({
-        modelId,
-        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
-        builtinExtensionsDir: getBuiltinExtensionsDir(),
-        blockedExtensionIds: activeExtensionInstalls,
-      })
-      return plan.kind === 'multi-source'
-        ? areModelSourcesDownloaded(modelsDir, modelId, plan.sources)
-        : isModelDownloaded(modelsDir, modelId, plan.downloadCheck)
+      const plan = await resolveModelPlan(modelId)
+      if (plan.kind === 'multi-source') return areModelSourcesDownloaded(modelsDir, modelId, plan.sources)
+      return isModelDownloaded(modelsDir, modelId, plan.downloadCheck)
+        && (!plan.weightVariants || installedWeightVariants(modelsDir, modelId, plan.weightVariants).length > 0)
     } catch {
       return false
     }
   })
 
+  // null means "unknown" (unreadable plan, or a node without variants) — the renderer
+  // must not read an empty array as "no variant installed".
+  ipcMain.handle('model:installedWeightVariants', async (_, modelId: string): Promise<string[] | null> => {
+    try {
+      const plan = await resolveModelPlan(modelId)
+      return plan.kind === 'legacy' && plan.weightVariants
+        ? installedWeightVariants(getSettings(app.getPath('userData')).modelsDir, modelId, plan.weightVariants)
+        : null
+    } catch {
+      return null
+    }
+  })
+
   ipcMain.handle('model:hasLocalData', async (_, modelId: string): Promise<boolean> => {
     try {
-      await resolveInstalledModelDownloadPlan({
-        modelId,
-        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
-        builtinExtensionsDir: getBuiltinExtensionsDir(),
-        blockedExtensionIds: activeExtensionInstalls,
-      })
+      await resolveModelPlan(modelId)
       return modelHasLocalData(getSettings(app.getPath('userData')).modelsDir, modelId)
     } catch {
       return false
@@ -438,45 +473,47 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('model:download', async (
     event,
     modelId: string,
+    requestedVariantId?: string | null,
   ) => {
     if (activeDownloads.has(modelId)) {
       return { success: false, error: 'Download already in progress' }
     }
+    const variantId = requestedVariantId ?? undefined
     let finish!: () => void
     const done = new Promise<void>((resolveDone) => { finish = resolveDone })
-    const active: ActiveDownload = { progress: { percent: 0 }, done, finish }
+    const active: ActiveDownload = { progress: { percent: 0, variantId }, done, finish }
     activeDownloads.set(modelId, active)
     try {
-      const plan = await resolveInstalledModelDownloadPlan({
-        modelId,
-        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
-        builtinExtensionsDir: getBuiltinExtensionsDir(),
-        blockedExtensionIds: activeExtensionInstalls,
-      })
-      const onProgress = (progress: typeof active.progress) => {
-        active.progress = progress
-        event.sender.send('model:downloadProgress', { modelId, ...progress })
+      const plan = await resolveModelPlan(modelId)
+      const onProgress = (progress: DownloadProgress) => {
+        active.progress = { ...progress, variantId }
+        event.sender.send('model:downloadProgress', { modelId, variantId, ...progress })
       }
       if (plan.kind === 'multi-source') {
+        if (variantId !== undefined) throw new Error(`Model node "${modelId}" does not declare weight variants`)
         await downloadModelSourcesFromHF(modelId, plan.sources, onProgress)
       } else {
-        await downloadModelFromHF(
-          plan.repoId,
-          modelId,
-          onProgress,
-          plan.skipPrefixes,
-          plan.includePrefixes,
-        )
+        // Shared files and the default variant are separate passes sharing one 0–100 bar.
+        const steps = legacyDownloadSteps(plan, variantId)
+        for (const [index, step] of steps.entries()) {
+          await downloadModelFromHF(
+            plan.repoId,
+            modelId,
+            (progress) => onProgress({ ...progress, percent: Math.round((index * 100 + progress.percent) / steps.length) }),
+            step.skipPrefixes,
+            step.includePrefixes,
+          )
+        }
       }
       return { success: true }
     } catch (err: any) {
       const message = err?.message ?? String(err)
       if (message.includes('paused')) {
-        event.sender.send('model:downloadProgress', { modelId, percent: 0, status: 'paused', paused: true })
+        event.sender.send('model:downloadProgress', { modelId, variantId, percent: 0, status: 'paused', paused: true })
         return { success: false, paused: true }
       }
       if (message.includes('cancelled')) {
-        event.sender.send('model:downloadProgress', { modelId, percent: 0, status: 'cancelled', cancelled: true })
+        event.sender.send('model:downloadProgress', { modelId, variantId, percent: 0, status: 'cancelled', cancelled: true })
         return { success: false, cancelled: true }
       }
       return { success: false, error: String(err) }
@@ -835,6 +872,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       hf_skip_prefixes?: string[]
       hf_include_prefixes?: string[]
       model_sources?: unknown
+      weight_variants?: unknown
     }[]
   }
 
@@ -857,7 +895,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       if (parsed.type === 'process' && n.model_sources !== undefined) {
         throw new Error('manifest.json: model_sources is supported only for model nodes')
       }
+      if (parsed.type === 'process' && n.weight_variants !== undefined) {
+        throw new Error('manifest.json: weight_variants is supported only for model nodes')
+      }
       const modelSources = normalizeModelSources(n)
+      const weightVariants = normalizeWeightVariants(n, n.params_schema ?? parsed.params_schema)
       return {
         id:             n.id,
         name:           n.name ?? n.id,
@@ -872,6 +914,16 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         hfSkipPrefixes: n.hf_skip_prefixes,
         hfIncludePrefixes: n.hf_include_prefixes,
         hasModelSources: modelSources !== undefined,
+        weightVariants: weightVariants && {
+          param:   weightVariants.param,
+          default: weightVariants.default,
+          options: weightVariants.options.map((option) => ({
+            id:     option.id,
+            label:  option.label,
+            sizeGb: option.size_gb,
+            vramGb: option.vram_gb,
+          })),
+        },
       }
     })
 

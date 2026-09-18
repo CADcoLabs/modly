@@ -8,7 +8,13 @@ import {
   assertSafeExtensionId,
   resolveExtensionPathWithinRoot,
 } from './extension-path-guard'
-import { normalizeModelSources, safeModelSourceId, type ModelSource } from './model-sources'
+import {
+  normalizeModelSources,
+  normalizeWeightVariants,
+  safeModelSourceId,
+  type ModelSource,
+  type WeightVariants,
+} from './model-sources'
 
 interface InstalledNode {
   id?: unknown
@@ -17,12 +23,15 @@ interface InstalledNode {
   hf_skip_prefixes?: unknown
   hf_include_prefixes?: unknown
   model_sources?: unknown
+  weight_variants?: unknown
+  params_schema?: unknown
 }
 
 interface InstalledManifest {
   id?: unknown
   type?: unknown
   model_sources?: unknown
+  params_schema?: unknown
   nodes?: unknown
 }
 
@@ -35,6 +44,7 @@ export type InstalledModelDownloadPlan = {
   downloadCheck?: string
   skipPrefixes?: string[]
   includePrefixes?: string[]
+  weightVariants?: WeightVariants
 } | {
   kind: 'multi-source'
   modelId: string
@@ -86,6 +96,7 @@ function parseManifest(raw: string, extensionId: string, nodeId: string): Instal
 
   const node = matches[0]
   const modelId = `${extensionId}/${nodeId}`
+  const weightVariants = normalizeWeightVariants(node, node.params_schema ?? manifest.params_schema)
   const sources = normalizeModelSources(node)
   if (sources) return { kind: 'multi-source', modelId, extensionId, nodeId, sources }
 
@@ -101,7 +112,43 @@ function parseManifest(raw: string, extensionId: string, nodeId: string): Instal
     downloadCheck: typeof node.download_check === 'string' ? node.download_check : undefined,
     skipPrefixes: node.hf_skip_prefixes as string[] | undefined,
     includePrefixes: node.hf_include_prefixes as string[] | undefined,
+    ...(weightVariants ? { weightVariants } : {}),
   }
+}
+
+export interface LegacyDownloadStep {
+  includePrefixes?: string[]
+  skipPrefixes?: string[]
+}
+
+/**
+ * Hugging Face filter passes for one download action. A node that declares weight
+ * variants always fetches its shared files first (every variant excluded), then the
+ * requested variant — its default one when no variant id is given. The shared pass
+ * skips files already complete on disk, so it stays cheap on a resume or a second
+ * variant.
+ */
+export function legacyDownloadSteps(
+  plan: Extract<InstalledModelDownloadPlan, { kind: 'legacy' }>,
+  variantId?: unknown,
+): LegacyDownloadStep[] {
+  const variants = plan.weightVariants
+  if (!variants) {
+    if (variantId !== undefined) {
+      throw new Error(`Model node "${plan.modelId}" has no weight variant "${String(variantId)}"`)
+    }
+    return [{ includePrefixes: plan.includePrefixes, skipPrefixes: plan.skipPrefixes }]
+  }
+  const selected = variantId === undefined ? variants.default : variantId
+  const variant = variants.options.find((option) => option.id === selected)
+  if (!variant) throw new Error(`Model node "${plan.modelId}" has no weight variant "${String(variantId)}"`)
+  return [
+    {
+      includePrefixes: plan.includePrefixes,
+      skipPrefixes: [...(plan.skipPrefixes ?? []), ...variants.options.flatMap((option) => option.include_prefixes)],
+    },
+    { includePrefixes: variant.include_prefixes, skipPrefixes: plan.skipPrefixes },
+  ]
 }
 
 /** Re-read the installed manifest for every model action; renderer metadata is never trusted. */

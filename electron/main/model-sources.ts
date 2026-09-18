@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readdirSync, statSync } from 'node:fs'
 import { readdir, rm } from 'node:fs/promises'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 export interface ModelSource {
   id: string
@@ -15,6 +15,31 @@ export interface ModelSource {
 
 export interface ModelSourceNode {
   model_sources?: unknown
+}
+
+/** One separately installable set of files inside a node's model directory (e.g. a quantization). */
+export interface WeightVariant {
+  id: string
+  label: string
+  size_gb?: number
+  vram_gb?: number
+  include_prefixes: string[]
+  checks: string[]
+}
+
+export interface WeightVariants {
+  /** params_schema id whose value selects the variant at generation time */
+  param: string
+  default: string
+  options: WeightVariant[]
+}
+
+export interface WeightVariantNode {
+  weight_variants?: unknown
+  hf_repo?: unknown
+  download_check?: unknown
+  model_sources?: unknown
+  params_schema?: unknown
 }
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -133,6 +158,114 @@ export function normalizeModelSources(node: ModelSourceNode): ModelSource[] | un
   })
 }
 
+function prefixesOverlap(left: string[], right: string[]): boolean {
+  return left.some((a) => right.some((b) => {
+    const lowerA = a.toLowerCase()
+    const lowerB = b.toLowerCase()
+    return lowerA.startsWith(lowerB) || lowerB.startsWith(lowerA)
+  }))
+}
+
+/** Variant ids must be selectable, so the param they key has to exist and offer them. */
+function assertParamOffersVariants(param: string, paramsSchema: unknown, ids: string[]): void {
+  const entry = Array.isArray(paramsSchema)
+    ? paramsSchema.find((p) => typeof p === 'object' && p !== null && (p as { id?: unknown }).id === param)
+    : undefined
+  if (!entry) throw new Error(`weight_variants.param must name a params_schema entry ("${param}")`)
+  const options = (entry as { options?: unknown }).options
+  if (!Array.isArray(options)) return
+  const values = new Set(options.map((option) =>
+    typeof option === 'object' && option !== null ? String((option as { value?: unknown }).value) : String(option)))
+  const missing = ids.filter((id) => !values.has(id))
+  if (missing.length > 0) {
+    throw new Error(`the "${param}" param must offer every weight variant id (missing: ${missing.join(', ')})`)
+  }
+}
+
+export function normalizeWeightVariants(
+  node: WeightVariantNode,
+  paramsSchema?: unknown,
+): WeightVariants | undefined {
+  if (!Object.prototype.hasOwnProperty.call(node, 'weight_variants')) return undefined
+  if (Object.prototype.hasOwnProperty.call(node, 'model_sources')) {
+    throw new Error('weight_variants cannot be combined with model_sources')
+  }
+  if (typeof node.hf_repo !== 'string' || !node.hf_repo) {
+    throw new Error('weight_variants requires hf_repo on the same node')
+  }
+  const raw = node.weight_variants
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('weight_variants must be an object')
+  }
+  const value = raw as Record<string, unknown>
+  const param = safeModelSourceId(value.param, 'weight_variants.param')
+  if (!Array.isArray(value.options) || value.options.length === 0) {
+    throw new Error('weight_variants.options must be a non-empty array')
+  }
+
+  const seen = new Map<string, string>()
+  const options = value.options.map((rawOption, index): WeightVariant => {
+    const field = `weight_variants.options[${index}]`
+    if (typeof rawOption !== 'object' || rawOption === null || Array.isArray(rawOption)) {
+      throw new Error(`${field} must be an object`)
+    }
+    const option = rawOption as Record<string, unknown>
+    const id = safeModelSourceId(option.id, `${field}.id`)
+    const alias = id.normalize('NFC').toLowerCase()
+    const previous = seen.get(alias)
+    if (previous) throw new Error(`weight variant ids "${previous}" and "${id}" are not portable-unique`)
+    seen.set(alias, id)
+    const label = option.label ?? id
+    if (typeof label !== 'string' || !label.trim()) throw new Error(`${field}.label must be a non-empty string`)
+    const sizeGb = option.size_gb
+    if (sizeGb !== undefined && (typeof sizeGb !== 'number' || !Number.isFinite(sizeGb) || sizeGb <= 0)) {
+      throw new Error(`${field}.size_gb must be a positive number`)
+    }
+    const vramGb = option.vram_gb
+    if (vramGb !== undefined && (typeof vramGb !== 'number' || !Number.isFinite(vramGb) || vramGb <= 0)) {
+      throw new Error(`${field}.vram_gb must be a positive number`)
+    }
+    const include = optionalPrefixes(option.include_prefixes, `${field}.include_prefixes`)
+    if (!include?.length) throw new Error(`${field}.include_prefixes must be a non-empty array`)
+    if (!Array.isArray(option.checks) || option.checks.length === 0) {
+      throw new Error(`${field}.checks must be a non-empty array`)
+    }
+    const checks = option.checks.map((check, checkIndex) => {
+      const path = safeModelRelativePath(check, `${field}.checks[${checkIndex}]`)
+      if (!include.some((prefix) => path.startsWith(prefix))) {
+        throw new Error(`${field}.checks[${checkIndex}] is not covered by its include_prefixes`)
+      }
+      return path
+    })
+    return {
+      id,
+      label,
+      ...(sizeGb === undefined ? {} : { size_gb: sizeGb }),
+      ...(vramGb === undefined ? {} : { vram_gb: vramGb }),
+      include_prefixes: include,
+      checks,
+    }
+  })
+
+  options.forEach((variant, index) => {
+    for (const other of options.slice(index + 1)) {
+      if (prefixesOverlap(variant.include_prefixes, other.include_prefixes)) {
+        throw new Error(`weight variants "${variant.id}" and "${other.id}" share files`)
+      }
+    }
+  })
+  const downloadCheck = node.download_check
+  if (typeof downloadCheck === 'string' && options.some((variant) => prefixesOverlap([downloadCheck], variant.include_prefixes))) {
+    throw new Error('download_check must name a file outside every weight variant')
+  }
+  const defaultId = value.default ?? options[0].id
+  if (!options.some((variant) => variant.id === defaultId)) {
+    throw new Error('weight_variants.default must name one of its options')
+  }
+  assertParamOffersVariants(param, paramsSchema ?? node.params_schema, options.map((variant) => variant.id))
+  return { param, default: defaultId as string, options }
+}
+
 function pathHasSymlink(root: string, candidate: string): boolean {
   const rootPath = resolve(root)
   const rel = relative(rootPath, resolve(candidate))
@@ -194,6 +327,43 @@ export function modelHasLocalData(modelsDir: string, modelId: string): boolean {
   } catch {
     return false
   }
+}
+
+function isDownloadedFile(root: string, relativePath: string): boolean {
+  const candidate = resolve(root, ...relativePath.split('/'))
+  if (!existsSync(candidate) || pathHasSymlink(root, candidate)) return false
+  try {
+    const stat = statSync(candidate)
+    return stat.isFile() && stat.size > 0
+  } catch {
+    return false
+  }
+}
+
+export function installedWeightVariants(modelsDir: string, modelId: string, variants: WeightVariants): string[] {
+  try {
+    const modelRoot = resolveModelRoot(modelsDir, modelId)
+    return variants.options
+      .filter((variant) => variant.checks.every((check) => isDownloadedFile(modelRoot, check)))
+      .map((variant) => variant.id)
+  } catch {
+    return []
+  }
+}
+
+/** Files of one variant on disk (in-progress `.part` files included), never through a symlink. */
+export async function listWeightVariantFiles(modelsDir: string, modelId: string, variant: WeightVariant): Promise<string[]> {
+  const modelRoot = resolveModelRoot(modelsDir, modelId)
+  if (!existsSync(modelRoot)) return []
+  const entries = await readdir(modelRoot, { recursive: true, withFileTypes: true })
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => resolve(entry.parentPath ?? modelRoot, entry.name))
+    .filter((path) => {
+      const relativePath = relative(modelRoot, path).split(sep).join('/')
+      return variant.include_prefixes.some((prefix) => relativePath.startsWith(prefix))
+        && !pathHasSymlink(modelRoot, path)
+    })
 }
 
 // Mirrors the backend's cancel cleanup (api/routers/model.py): only the in-progress

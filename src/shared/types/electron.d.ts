@@ -25,6 +25,13 @@ export interface ExtensionNode {
   hfSkipPrefixes?:  string[]
   hfIncludePrefixes?: string[]
   hasModelSources?: boolean
+  weightVariants?:  WeightVariantsInfo
+}
+
+export interface WeightVariantsInfo {
+  param:   string   // params_schema id whose value selects the variant
+  default: string
+  options: { id: string; label: string; sizeGb?: number; vramGb?: number }[]
 }
 
 export interface ModelExtension {
@@ -207,17 +214,21 @@ declare global {
       model: {
         export:         (args: { outputUrl: string; format: string }) => Promise<{ success: boolean; error?: string }>
         listDownloaded: () => Promise<{ id: string; name: string; size_gb: number }[]>
-        activeDownloads: () => Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]>
+        activeDownloads: () => Promise<{ modelId: string; variantId?: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]>
         isDownloaded:   (modelId: string) => Promise<boolean>
         hasLocalData:    (modelId: string) => Promise<boolean>
-        download:       (modelId: string) => Promise<{ success: boolean; error?: string; paused?: boolean; cancelled?: boolean }>
+        download:       (modelId: string, variantId?: string) => Promise<{ success: boolean; error?: string; paused?: boolean; cancelled?: boolean }>
         pauseDownload:  (modelId: string) => Promise<{ success: boolean; error?: string }>
         cancelDownload: (modelId: string) => Promise<{ success: boolean; error?: string }>
         delete:         (modelId: string) => Promise<{ success: boolean; error?: string }>
+        /** Installed variant ids, or null when the node's install state could not be read */
+        installedWeightVariants: (modelId: string) => Promise<string[] | null>
+        deleteWeightVariant: (modelId: string, variantId: string) => Promise<{ success: boolean; error?: string }>
         unloadAll:      () => Promise<{ success: boolean; error?: string }>
         showInFolder:   (modelId: string) => Promise<void>
         onProgress:     (cb: (data: {
           modelId: string
+          variantId?: string
           percent: number
           file?: string
           fileIndex?: number

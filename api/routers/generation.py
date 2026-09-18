@@ -185,6 +185,7 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
 
     try:
         loop = asyncio.get_running_loop()
+        generator_registry.assert_weight_variant_installed(params)
 
         # Check if the model needs to be loaded BEFORE calling get_active(),
         # because get_active() loads the model in a blocking manner.

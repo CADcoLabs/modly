@@ -17,6 +17,7 @@ import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
 import { PICKER_LABELS, openParamPicker, resolvePickerIntent } from '@shared/utils/paramPicker'
 import { PickerIcon } from '@shared/components/ui'
+import { isMissingWeightVariant, withWeightVariantAvailability } from '@shared/utils/weightVariants'
 import ChatPanel from './ChatPanel'
 
 type PanelMode = 'basic' | 'chat'
@@ -383,6 +384,8 @@ function WaitParamRow({ nodeId }: { nodeId: string }) {
 
 function ExtensionParamRow({ nodeId, ext, nodes, onPatch }: { nodeId: string; ext: WorkflowExtension; nodes: FlowNode[]; onPatch: PatchFn }) {
   const [expanded, setExpanded] = useState(true)
+  const installedVariants = useExtensionsStore((s) => s.installedWeightVariants[ext.id])
+  const openExtension = useNavStore((s) => s.openExtension)
   const node    = nodes.find((n) => n.id === nodeId)
   const data    = node?.data as { enabled: boolean; params: Record<string, unknown> } | undefined
   const enabled = data?.enabled ?? true
@@ -430,8 +433,11 @@ function ExtensionParamRow({ nodeId, ext, nodes, onPatch }: { nodeId: string; ex
               <div key={param.id} className="flex items-center gap-2">
                 <label className="text-[10px] text-zinc-500 w-20 shrink-0 truncate">{param.label}</label>
                 <div className="flex-1">
-                  <ParamField param={param} value={val}
-                    onChange={(v) => onPatch(nodeId, { params: { ...(data?.params ?? {}), [param.id]: v } })} />
+                  <ParamField param={withWeightVariantAvailability(param, ext.weightVariants, installedVariants)} value={val}
+                    onChange={(v) => {
+                      onPatch(nodeId, { params: { ...(data?.params ?? {}), [param.id]: v } })
+                      if (isMissingWeightVariant(param.id, v, ext.weightVariants, installedVariants)) openExtension(ext.extensionId)
+                    }} />
                 </div>
               </div>
             )

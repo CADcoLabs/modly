@@ -1,7 +1,9 @@
 import {
   normalizeModelSources,
+  normalizeWeightVariants,
   safeModelSourceId,
   type ModelSourceNode,
+  type WeightVariantNode,
 } from './model-sources'
 
 export interface InstallManifest {
@@ -10,7 +12,8 @@ export interface InstallManifest {
   entry?: string
   generator_class?: string
   model_sources?: unknown
-  nodes?: Array<{ id?: string; model_sources?: unknown } & ModelSourceNode>
+  params_schema?: unknown
+  nodes?: Array<{ id?: string; model_sources?: unknown } & ModelSourceNode & WeightVariantNode>
 }
 
 export interface ValidatedInstallManifest {
@@ -50,12 +53,14 @@ export function validateInstallManifest(
     throw new Error('manifest.json: model_sources must be declared on a model node')
   }
   for (const node of Array.isArray(manifest.nodes) ? manifest.nodes : []) {
-    if (node.model_sources === undefined) continue
+    if (node.model_sources === undefined && node.weight_variants === undefined) continue
     if (isProcess) {
-      throw new Error('manifest.json: model_sources is supported only for model nodes')
+      const field = node.model_sources !== undefined ? 'model_sources' : 'weight_variants'
+      throw new Error(`manifest.json: ${field} is supported only for model nodes`)
     }
     safeModelSourceId(node.id, 'model node id')
     normalizeModelSources(node)
+    normalizeWeightVariants(node, node.params_schema ?? manifest.params_schema)
   }
 
   if (isProcess) {

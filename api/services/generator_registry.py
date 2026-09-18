@@ -25,7 +25,12 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from services.generators.base import BaseGenerator
 from services.extension_process import ExtensionProcess, _venv_python
-from services.model_sources import model_sources_are_downloaded, normalize_model_sources
+from services.model_sources import (
+    missing_weight_variant,
+    model_sources_are_downloaded,
+    normalize_model_sources,
+    normalize_weight_variants,
+)
 
 # ------------------------------------------------------------------ #
 # Global paths
@@ -528,6 +533,9 @@ def _discover_extensions(
             if nodes:
                 for node in nodes:
                     model_sources = normalize_model_sources(node)
+                    weight_variants = normalize_weight_variants(
+                        node, node.get("params_schema", manifest.get("params_schema", []))
+                    )
                     node_manifest = {
                         **manifest,
                         "id":               f"{ext_id}/{node['id']}",
@@ -544,6 +552,8 @@ def _discover_extensions(
                     }
                     if model_sources is not None:
                         node_manifest["model_sources"] = model_sources
+                    if weight_variants is not None:
+                        node_manifest["weight_variants"] = weight_variants
                     full_id = f"{ext_id}/{node['id']}"
                     result[full_id] = (cls_or_None, node_manifest, ext_dir, legacy_context)
                     if subprocess_mode:
@@ -723,6 +733,18 @@ class GeneratorRegistry:
                     gen._auto_download()
             gen.load()
         return gen
+
+    def assert_weight_variant_installed(self, params: dict) -> None:
+        """Refuse generation when the weight variant selected by params is not installed."""
+        manifest = self._manifests.get(self._active_id, {})
+        option = missing_weight_variant(
+            MODELS_DIR, self._active_id, manifest.get("weight_variants"), params
+        )
+        if option is not None:
+            raise RuntimeError(
+                f'{option["label"]} weights for {self._active_id} are not installed. '
+                "Install them from the Extensions page, or select an installed variant."
+            )
 
     def get_generator(self, model_id: str) -> BaseGenerator:
         self._assert_not_quarantined(model_id)

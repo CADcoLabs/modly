@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from pathlib import Path
@@ -270,3 +271,171 @@ def validate_source_file_plan(
                             f'"{previous_source}:{previous_target}" and "{source_id}:{value}"'
                         )
                 aliases[alias] = (source_id, value)
+
+
+def _prefixes_overlap(left: list[str], right: list[str]) -> bool:
+    return any(
+        a.lower().startswith(b.lower()) or b.lower().startswith(a.lower())
+        for a in left
+        for b in right
+    )
+
+
+def _assert_param_offers_variants(param: str, params_schema: Any, ids: list[str]) -> None:
+    """Variant ids must be selectable, so the param they key has to exist and offer them."""
+    entry = next(
+        (p for p in params_schema if isinstance(p, dict) and p.get("id") == param),
+        None,
+    ) if isinstance(params_schema, list) else None
+    if entry is None:
+        raise ValueError(f'weight_variants.param must name a params_schema entry ("{param}")')
+    options = entry.get("options")
+    if not isinstance(options, list):
+        return
+    values = {
+        str(option.get("value")) if isinstance(option, dict) else str(option)
+        for option in options
+    }
+    missing = [variant_id for variant_id in ids if variant_id not in values]
+    if missing:
+        raise ValueError(
+            f'the "{param}" param must offer every weight variant id '
+            f'(missing: {", ".join(missing)})'
+        )
+
+
+def normalize_weight_variants(
+    node: dict[str, Any], params_schema: Any = None
+) -> dict[str, Any] | None:
+    """Validate a node's separately installable weight variants (e.g. quantizations)."""
+    if "weight_variants" not in node:
+        return None
+    if "model_sources" in node:
+        raise ValueError("weight_variants cannot be combined with model_sources")
+    if not isinstance(node.get("hf_repo"), str) or not node["hf_repo"]:
+        raise ValueError("weight_variants requires hf_repo on the same node")
+    raw = node["weight_variants"]
+    if not isinstance(raw, dict):
+        raise ValueError("weight_variants must be an object")
+    param = safe_source_id(raw.get("param"), "weight_variants.param")
+    raw_options = raw.get("options")
+    if not isinstance(raw_options, list) or not raw_options:
+        raise ValueError("weight_variants.options must be a non-empty array")
+
+    aliases: dict[str, str] = {}
+    options: list[dict[str, Any]] = []
+    for index, raw_option in enumerate(raw_options):
+        field = f"weight_variants.options[{index}]"
+        if not isinstance(raw_option, dict):
+            raise ValueError(f"{field} must be an object")
+        variant_id = safe_source_id(raw_option.get("id"), f"{field}.id")
+        alias = unicodedata.normalize("NFC", variant_id).casefold()
+        if alias in aliases:
+            raise ValueError(
+                f'weight variant ids "{aliases[alias]}" and "{variant_id}" are not portable-unique'
+            )
+        aliases[alias] = variant_id
+        label = raw_option.get("label", variant_id)
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError(f"{field}.label must be a non-empty string")
+        size_gb = raw_option.get("size_gb")
+        if size_gb is not None and (
+            isinstance(size_gb, bool)
+            or not isinstance(size_gb, (int, float))
+            or not math.isfinite(size_gb)
+            or size_gb <= 0
+        ):
+            raise ValueError(f"{field}.size_gb must be a positive number")
+        vram_gb = raw_option.get("vram_gb")
+        if vram_gb is not None and (
+            isinstance(vram_gb, bool)
+            or not isinstance(vram_gb, (int, float))
+            or not math.isfinite(vram_gb)
+            or vram_gb <= 0
+        ):
+            raise ValueError(f"{field}.vram_gb must be a positive number")
+        include = _prefixes(raw_option.get("include_prefixes"), f"{field}.include_prefixes")
+        if not include:
+            raise ValueError(f"{field}.include_prefixes must be a non-empty array")
+        checks = raw_option.get("checks")
+        if not isinstance(checks, list) or not checks:
+            raise ValueError(f"{field}.checks must be a non-empty array")
+        safe_checks: list[str] = []
+        for check_index, check in enumerate(checks):
+            path = safe_relative_path(check, f"{field}.checks[{check_index}]")
+            if not any(path.startswith(prefix) for prefix in include):
+                raise ValueError(
+                    f"{field}.checks[{check_index}] is not covered by its include_prefixes"
+                )
+            safe_checks.append(path)
+        option: dict[str, Any] = {
+            "id": variant_id,
+            "label": label,
+            "include_prefixes": include,
+            "checks": safe_checks,
+        }
+        if size_gb is not None:
+            option["size_gb"] = size_gb
+        if vram_gb is not None:
+            option["vram_gb"] = vram_gb
+        options.append(option)
+
+    for index, option in enumerate(options):
+        for other in options[index + 1:]:
+            if _prefixes_overlap(option["include_prefixes"], other["include_prefixes"]):
+                raise ValueError(
+                    f'weight variants "{option["id"]}" and "{other["id"]}" share files'
+                )
+    download_check = node.get("download_check")
+    if isinstance(download_check, str) and any(
+        _prefixes_overlap([download_check], option["include_prefixes"]) for option in options
+    ):
+        raise ValueError("download_check must name a file outside every weight variant")
+    default = raw.get("default", options[0]["id"])
+    if not any(option["id"] == default for option in options):
+        raise ValueError("weight_variants.default must name one of its options")
+    _assert_param_offers_variants(
+        param,
+        node.get("params_schema") if params_schema is None else params_schema,
+        [option["id"] for option in options],
+    )
+    return {"param": param, "default": default, "options": options}
+
+
+def installed_weight_variants(
+    models_dir: Path, model_id: str, variants: dict[str, Any]
+) -> list[str]:
+    try:
+        model_root = resolve_model_root(models_dir, model_id)
+    except ValueError:
+        return []
+
+    def _present(check: str) -> bool:
+        try:
+            candidate = resolve_download_path(model_root, check)
+            return candidate.is_file() and candidate.stat().st_size > 0
+        except (OSError, ValueError):
+            return False
+
+    return [
+        option["id"]
+        for option in variants["options"]
+        if all(_present(check) for check in option["checks"])
+    ]
+
+
+def missing_weight_variant(
+    models_dir: Path,
+    model_id: str,
+    variants: dict[str, Any] | None,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """The variant selected by params when its files are not installed, else None."""
+    if not variants:
+        return None
+    selected = params.get(variants["param"])
+    selected_id = variants["default"] if selected is None else str(selected)
+    option = next((o for o in variants["options"] if o["id"] == selected_id), None)
+    if option is None or option["id"] in installed_weight_variants(models_dir, model_id, variants):
+        return None
+    return option

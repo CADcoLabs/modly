@@ -211,6 +211,61 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Model sources are incomplete"):
             self.registry.get_active()
 
+    def test_selected_weight_variant_must_be_installed_before_generation(self) -> None:
+        def variant(quant: str) -> dict:
+            return {
+                "id": quant,
+                "include_prefixes": [f"dit_{quant}.gguf"],
+                "checks": [f"dit_{quant}.gguf"],
+            }
+
+        extension = self._make_extension("quantized")
+        manifest = {
+            "id": "quantized",
+            "name": "quantized",
+            "type": "model",
+            "generator_class": "TestGenerator",
+            "params_schema": [
+                {"id": "quant", "type": "select", "options": [{"value": "Q4"}, {"value": "Q5"}]}
+            ],
+            "nodes": [{
+                "id": "generate",
+                "hf_repo": "org/model-gguf",
+                "download_check": "pipeline.json",
+                "weight_variants": {
+                    "param": "quant",
+                    "default": "Q5",
+                    "options": [variant("Q4"), variant("Q5")],
+                },
+            }],
+        }
+        (extension / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (extension / "generator.py").write_text(
+            "\n".join([
+                "from services.generators.base import BaseGenerator",
+                "class TestGenerator(BaseGenerator):",
+                "    def is_downloaded(self): return True",
+                "    def load(self): self._model = object()",
+                "    def generate(self, image_bytes, params, progress_cb=None, cancel_event=None):",
+                "        return self.outputs_dir / 'result.glb'",
+            ]),
+            encoding="utf-8",
+        )
+
+        self.registry.initialize()
+        self.registry._active_id = "quantized/generate"
+        manifest_variants = self.registry.get_manifest("quantized/generate")["weight_variants"]
+        self.assertEqual([option["id"] for option in manifest_variants["options"]], ["Q4", "Q5"])
+
+        model_root = self.models_dir / "quantized" / "generate"
+        model_root.mkdir(parents=True)
+        (model_root / "dit_Q5.gguf").write_bytes(b"q5")
+        self.registry.assert_weight_variant_installed({})
+        self.registry.assert_weight_variant_installed({"quant": "Q5"})
+        self.registry.assert_weight_variant_installed({"quant": "fp16"})
+        with self.assertRaisesRegex(RuntimeError, "Q4 weights for quantized/generate are not installed"):
+            self.registry.assert_weight_variant_installed({"quant": "Q4"})
+
     def test_reload_preserves_legacy_path_owned_by_the_host(self) -> None:
         extension = self._make_extension("host-owned-path")
         self._write_manifest(extension, extension_id="host-owned-path")

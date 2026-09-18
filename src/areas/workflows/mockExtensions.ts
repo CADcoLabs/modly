@@ -1,6 +1,6 @@
 import type { ModelExtension, ProcessExtension } from '@shared/stores/extensionsStore'
 export type { ParamSchema } from '@shared/types/electron.d'
-import type { ParamSchema } from '@shared/types/electron.d'
+import type { ParamSchema, WeightVariantsInfo } from '@shared/types/electron.d'
 
 export interface WorkflowExtension {
   id:              string   // "ext_id/node_id"
@@ -17,6 +17,7 @@ export interface WorkflowExtension {
   params:          ParamSchema[]
   builtin:         boolean
   type:            'model' | 'process'
+  weightVariants?: WeightVariantsInfo
 }
 
 function applyParamDefaults(
@@ -77,6 +78,7 @@ export function buildAllWorkflowExtensions(
         params:          applyParamDefaults(node.paramsSchema as ParamSchema[], node.paramDefaults),
         builtin:         ext.builtin,
         type:            'model',
+        weightVariants:  node.weightVariants,
       })
     }
   }
