@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import quote
 from pydantic import BaseModel
 
+from services import imported_sources
 from services.generator_registry import WORKSPACE_DIR
 
 router = APIRouter(tags=["optimize"])
@@ -420,6 +421,7 @@ async def import_mesh_by_path(body: ImportByPathRequest):
 
     if ext == "glb":
         # Serve the original file directly — no copy
+        imported_sources.register(file_path, file_path)
         return {"url": f"/optimize/serve-file?path={quote(str(file_path))}"}
 
     # Mesh ply / obj / stl: convert to GLB in a temp directory (not the workspace)
@@ -427,6 +429,10 @@ async def import_mesh_by_path(body: ImportByPathRequest):
     output_path = os.path.join(tmp_dir, "mesh.glb")
     loaded = trimesh.load(str(file_path))
     loaded.export(output_path)
+    # Remember the ORIGINAL extension: this conversion changes the container but
+    # not the axes, so a .stl imported here still holds Z-up data despite the
+    # .glb suffix, and must not be rotated as if it were glTF.
+    imported_sources.register(output_path, file_path)
     return {"url": f"/optimize/serve-file?path={quote(output_path)}"}
 
 

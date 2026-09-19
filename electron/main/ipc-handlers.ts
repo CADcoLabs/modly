@@ -596,8 +596,13 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('shell:openExternal', (_, url: string) => shell.openExternal(url))
 
   // Open a model in OrcaSlicer via its orcaslicer://open?file=<url> deeplink.
-  // Returns success/error so the renderer can surface a fallback (e.g. when
-  // OrcaSlicer is not installed and no app is registered for the scheme).
+  //
+  // The returned error only covers the shell refusing the call outright. It is
+  // NOT an install check: on Windows an unregistered scheme still makes
+  // ShellExecuteEx succeed — the OS shows its own "You'll need a new app to open
+  // this orcaslicer link" dialog and this resolves with success. Detecting a
+  // missing OrcaSlicer would take a per-platform handler probe (registry on
+  // Windows), so the renderer must not promise the user that it knows.
   ipcMain.handle('slicer:open', async (_, url: string): Promise<{ success: boolean; error?: string }> => {
     if (typeof url !== 'string' || !url.startsWith('orcaslicer://')) {
       return { success: false, error: 'slicer:open requires an orcaslicer:// URL' }

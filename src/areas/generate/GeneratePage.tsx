@@ -689,7 +689,9 @@ export default function GeneratePage(): JSX.Element {
       const link = buildOrcaSlicerDeepLink(apiUrl, currentJob.outputUrl)
       const result = await window.electron.slicer.open(link)
       if (!result.success) {
-        showError(result.error ?? 'Could not open OrcaSlicer. Make sure it is installed.')
+        // Deliberately not "make sure it is installed": the main process cannot
+        // tell a missing OrcaSlicer from a working one (see slicer:open).
+        showError(result.error ?? 'Could not open OrcaSlicer.')
       }
     } catch (err) {
       showError(err instanceof Error ? err.message : 'Could not open OrcaSlicer.')

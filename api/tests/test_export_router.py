@@ -13,6 +13,7 @@ try:
     import trimesh
 
     import routers.export as export_router
+    from services import imported_sources
 
     HAVE_TRIMESH = True
 except Exception:  # noqa: BLE001
@@ -34,9 +35,10 @@ class ExportForSlicerTests(unittest.TestCase):
         self.workspace = Path(self._tmp.name).resolve()
         self._orig_workspace = export_router.WORKSPACE_DIR
         export_router.WORKSPACE_DIR = self.workspace
-        # A box that is tallest along Y (glTF up-axis). Exported to GLB, it
-        # reloads as a Scene so the flatten path is exercised too.
-        box = trimesh.creation.box(extents=[10.0, 30.0, 10.0])
+        # A box that is tallest along Y (glTF up-axis) and unit-sized, matching
+        # what image-to-3D generators emit. Exported to GLB, it reloads as a
+        # Scene so the flatten path is exercised too.
+        box = trimesh.creation.box(extents=[0.3, 1.0, 0.3])
         self.rel = "Workflows/hero.glb"
         (self.workspace / "Workflows").mkdir(parents=True, exist_ok=True)
         box.export(str(self.workspace / self.rel))
@@ -63,6 +65,24 @@ class ExportForSlicerTests(unittest.TestCase):
         resp = export_router.export_for_slicer("stl", _token(self.rel), "model.stl")
         longest = float(max(_load_stl(resp).extents))
         self.assertAlmostEqual(longest, export_router.DEFAULT_PRINT_LONGEST_MM, places=3)
+
+    def test_leaves_a_real_world_sized_mesh_alone(self) -> None:
+        # A mesh that already carries a physical size is the user's own: silently
+        # shrinking a 180 mm part to 50 mm would waste a print.
+        big = trimesh.creation.box(extents=[40.0, 180.0, 40.0])
+        rel = "Workflows/part.glb"
+        big.export(str(self.workspace / rel))
+        resp = export_router.export_for_slicer("stl", _token(rel), "model.stl")
+        self.assertAlmostEqual(float(max(_load_stl(resp).extents)), 180.0, places=2)
+
+    def test_does_not_rotate_a_z_up_stl_source(self) -> None:
+        # STL is conventionally Z-up already; the glTF Y->Z rotation would lay an
+        # upright model on its side.
+        rel = "Workflows/upright.stl"
+        trimesh.creation.box(extents=[10.0, 10.0, 30.0]).export(str(self.workspace / rel))
+        resp = export_router.export_for_slicer("stl", _token(rel), "model.stl")
+        ex = _load_stl(resp).extents
+        self.assertEqual(int(np.argmax(ex)), 2, f"expected Z to stay the tallest axis, got extents {ex}")
 
     def test_rejects_unsupported_format(self) -> None:
         with self.assertRaises(HTTPException) as ctx:
@@ -124,6 +144,64 @@ class FlattenAndScaleHelperTests(unittest.TestCase):
         # A single point cloud has zero extent; scaling must not divide by zero.
         mesh = trimesh.Trimesh(vertices=[[0, 0, 0]], faces=[])
         export_router._scale_to_print_size(mesh)  # must not raise
+
+
+@unittest.skipUnless(HAVE_TRIMESH, "trimesh not installed")
+class ImportedSourceSlicerTests(unittest.TestCase):
+    """Meshes imported from outside the workspace are sliceable — but only the
+    exact files the user picked, and never with the wrong up-axis."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.outside = Path(self._tmp.name).resolve()
+        self._orig_workspace = export_router.WORKSPACE_DIR
+        # A workspace elsewhere, so nothing here is reachable as a relative path.
+        self._ws_tmp = tempfile.TemporaryDirectory()
+        export_router.WORKSPACE_DIR = Path(self._ws_tmp.name).resolve()
+        imported_sources.clear()
+        # Unit-sized and tallest along Y, as a glTF export would be.
+        self.mesh_path = self.outside / "imported.glb"
+        trimesh.creation.box(extents=[0.3, 1.0, 0.3]).export(str(self.mesh_path))
+
+    def tearDown(self) -> None:
+        export_router.WORKSPACE_DIR = self._orig_workspace
+        imported_sources.clear()
+        self._tmp.cleanup()
+        self._ws_tmp.cleanup()
+
+    def test_rejects_an_absolute_path_that_was_never_imported(self) -> None:
+        # The whole point of the registry: an absolute path alone buys nothing.
+        with self.assertRaises(HTTPException) as ctx:
+            export_router.export_for_slicer("stl", _token(str(self.mesh_path)), "model.stl")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_serves_a_registered_import(self) -> None:
+        imported_sources.register(self.mesh_path, self.mesh_path)
+        resp = export_router.export_for_slicer("stl", _token(str(self.mesh_path)), "model.stl")
+        self.assertEqual(resp.media_type, "model/stl")
+        self.assertGreater(len(_load_stl(resp).faces), 0)
+
+    def test_rotates_a_registered_gltf_import(self) -> None:
+        imported_sources.register(self.mesh_path, self.mesh_path)
+        resp = export_router.export_for_slicer("stl", _token(str(self.mesh_path)), "model.stl")
+        ex = _load_stl(resp).extents
+        self.assertEqual(int(np.argmax(ex)), 2, f"expected Z to be the tallest axis, got extents {ex}")
+
+    def test_does_not_rotate_an_import_that_was_stl_before_conversion(self) -> None:
+        # `import-by-path` converts STL/OBJ/PLY to GLB without touching the axes,
+        # so the .glb container here still holds Z-up data. Rotating it would be
+        # exactly the bug the rotation exists to prevent.
+        imported_sources.register(self.mesh_path, self.outside / "original.stl")
+        resp = export_router.export_for_slicer("stl", _token(str(self.mesh_path)), "model.stl")
+        ex = _load_stl(resp).extents
+        self.assertEqual(int(np.argmax(ex)), 1, f"expected Y to stay the tallest axis, got extents {ex}")
+
+    def test_registered_but_deleted_file_is_404(self) -> None:
+        imported_sources.register(self.mesh_path, self.mesh_path)
+        self.mesh_path.unlink()
+        with self.assertRaises(HTTPException) as ctx:
+            export_router.export_for_slicer("stl", _token(str(self.mesh_path)), "model.stl")
+        self.assertEqual(ctx.exception.status_code, 404)
 
 
 if __name__ == "__main__":
