@@ -34,14 +34,18 @@ class SceneInputTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 validate_scene_input(self.workspace, path)
 
-    def test_rejects_symlinks_missing_assets_and_oversized_manifest(self):
+    def test_rejects_symlink_escape_when_supported(self):
         outside = Path(self.tmp.name) / "outside"
         outside.mkdir()
         (outside / "scene-manifest.json").write_text(self.manifest.read_text())
-        (self.workspace / "Workflows" / "link").symlink_to(outside, target_is_directory=True)
+        try:
+            (self.workspace / "Workflows" / "link").symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"directory symlinks are unavailable on this host: {exc}")
         with self.assertRaises(ValueError):
             validate_scene_input(self.workspace, "Workflows/link")
 
+    def test_rejects_missing_assets_and_oversized_manifest(self):
         data = json.loads(self.manifest.read_text())
         data["assets"] = [{"path": "missing.glb"}]
         self.manifest.write_text(json.dumps(data))

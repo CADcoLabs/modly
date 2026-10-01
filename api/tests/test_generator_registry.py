@@ -155,7 +155,7 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         self.registry.reload()
         self.assertNotIn(str(extension.resolve()), sys.path)
 
-    def test_scene_io_is_registered_but_capture_and_video_are_rejected(self) -> None:
+    def test_scene_and_existing_custom_io_types_are_registered(self) -> None:
         for extension_id, input_kind in (("scene-io", "scene"), ("capture-io", "capture"), ("video-io", "video")):
             extension = self._make_extension(extension_id)
             manifest = {
@@ -174,8 +174,8 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
 
         self.registry.initialize()
         self.assertEqual(self.registry.get_manifest("scene-io/generate")["input"], "scene")
-        self.assertIn("capture-io/generate", self.registry.load_errors())
-        self.assertIn("video-io/generate", self.registry.load_errors())
+        self.assertEqual(self.registry.get_manifest("capture-io/generate")["input"], "capture")
+        self.assertEqual(self.registry.get_manifest("video-io/generate")["input"], "video")
 
     def test_scene_input_rejects_multi_input_shapes_but_image_multi_can_output_scene(self) -> None:
         cases = {
@@ -257,6 +257,37 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         (model_root / "main.bin").unlink()
         with self.assertRaisesRegex(RuntimeError, "Model sources are incomplete"):
             self.registry.get_active()
+
+    def test_activate_ready_generator_switches_before_loading_exact_model(self) -> None:
+        class Generator:
+            DISPLAY_NAME = "test"
+            def __init__(self):
+                self.loaded = False
+                self.unloads = 0
+            def is_downloaded(self): return True
+            def is_loaded(self): return self.loaded
+            def load(self): self.loaded = True
+            def unload(self):
+                self.loaded = False
+                self.unloads += 1
+
+        first = Generator()
+        second = Generator()
+        first.loaded = True
+        self.registry._generators = {"demo/a": first, "demo/b": second}
+        self.registry._manifests = {
+            "demo/a": {"name": "A"},
+            "demo/b": {"name": "B"},
+        }
+        self.registry._active_id = "demo/a"
+
+        selected = self.registry.activate_ready_generator("demo/b")
+
+        self.assertIs(selected, second)
+        self.assertEqual(self.registry._active_id, "demo/b")
+        self.assertFalse(first.loaded)
+        self.assertEqual(first.unloads, 1)
+        self.assertTrue(second.loaded)
 
     def test_reload_preserves_legacy_path_owned_by_the_host(self) -> None:
         extension = self._make_extension("host-owned-path")

@@ -4,6 +4,7 @@ import threading
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Optional, Union
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException, BackgroundTasks
@@ -28,6 +29,14 @@ _jobs: Dict[str, JobStatus] = {}
 _cancelled: set = set()
 _cancel_events: Dict[str, threading.Event] = {}
 _completed_at: Dict[str, float] = {}
+_job_generators: Dict[str, object] = {}
+# A pinned generation owns the complete switch/load/generate lifecycle.  Keeping
+# that lifecycle on one dedicated worker provides process-wide serialization
+# without parking default-executor workers on a blocking lock acquisition.
+_pinned_generation_executor = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="modly-pinned-generation",
+)
 
 _JOB_TTL = 1800  # purge terminal jobs after 30 minutes
 
@@ -39,6 +48,7 @@ def _purge_old_jobs() -> None:
         _jobs.pop(jid, None)
         _cancelled.discard(jid)
         _cancel_events.pop(jid, None)
+        _job_generators.pop(jid, None)
         _completed_at.pop(jid, None)
 
 
@@ -110,8 +120,6 @@ async def generate_from_image(
         output_kind = generator_registry.get_manifest(model_id).get("output", "mesh")
     except ValueError as e:
         raise HTTPException(400, str(e))
-
-    generator_registry.switch_model(model_id)
 
     # Parse model-specific params from JSON and merge with common fields
     try:
@@ -197,11 +205,10 @@ async def cancel_job(job_id: str):
     if job.status in ("pending", "running"):
         job.status = "cancelled"
         _completed_at[job_id] = time.monotonic()
-    # Kill the active generator subprocess immediately so inference stops now.
-    # _run_generation will catch the resulting exception, see job_id in _cancelled,
-    # and return cleanly without setting an error status.
+    # Kill only the subprocess bound to this job. A queued cancellation must not
+    # terminate whichever earlier job currently owns the active generator.
     try:
-        gen = generator_registry._generators.get(generator_registry._active_id)
+        gen = _job_generators.get(job_id)
         if gen is not None and hasattr(gen, "_proc") and gen._proc and gen._proc.poll() is None:
             gen._proc.kill()
             gen._loaded = False
@@ -219,6 +226,50 @@ async def _run_generation(
     output_kind: str = "mesh",
     model_id: Optional[str] = None,
 ) -> None:
+    # Pinned jobs share one model lifecycle. Switching is deliberately deferred
+    # until this job runs on the dedicated worker: request-time switches can
+    # otherwise unload a running job or leave A loading beside B.  Crucially,
+    # queued jobs are executor work items rather than default-executor threads
+    # blocked on a lock, so cancelling a waiter cannot orphan queue ownership or
+    # starve the worker that performs generation.
+    loop = asyncio.get_running_loop()
+    executor = _pinned_generation_executor if model_id is not None else None
+    future = loop.run_in_executor(
+        executor,
+        _run_generation_impl,
+        job_id,
+        model_input,
+        params,
+        collection,
+        output_kind,
+        model_id,
+    )
+    try:
+        await future
+    except asyncio.CancelledError:
+        # asyncio cancellation attempts to cancel a queued concurrent future.
+        # If it has already begun, the event lets the generator stop safely.
+        _cancelled.add(job_id)
+        cancel_event = _cancel_events.get(job_id)
+        if cancel_event is not None:
+            cancel_event.set()
+        job = _jobs.get(job_id)
+        if job is not None and job.status in ("pending", "running"):
+            job.status = "cancelled"
+            _completed_at[job_id] = time.monotonic()
+        raise
+
+
+def _run_generation_impl(
+    job_id: str,
+    model_input: Union[bytes, TypedArtifactInput],
+    params: dict,
+    collection: str,
+    output_kind: str,
+    model_id: Optional[str],
+) -> None:
+    if job_id in _cancelled:
+        return
     job = _jobs[job_id]
     job.status = "running"
 
@@ -232,17 +283,15 @@ async def _run_generation(
             job.step = step
 
     try:
-        loop = asyncio.get_running_loop()
-
-        # Check if the model needs to be loaded BEFORE calling get_active(),
-        # because get_active() loads the model in a blocking manner.
-        # active_status() is an instantaneous operation (simple dict lookup).
-        get_generator = (lambda: generator_registry.get_ready_generator(model_id)) \
+        # Check if the model needs to be loaded BEFORE calling the generator
+        # getter, because that call can load the model in a blocking manner.
+        get_generator = (lambda: generator_registry.activate_ready_generator(model_id)) \
             if model_id is not None else generator_registry.get_active
-        status_reader = getattr(generator_registry, "model_status", None)
-        status = (status_reader(model_id) if model_id is not None and status_reader
-                  else generator_registry.active_status() if model_id is None
-                  else {"name": model_id, "downloaded": True, "loaded": False})
+        if model_id is not None:
+            _job_generators[job_id] = generator_registry.get_generator(model_id)
+        status_reader = (lambda: generator_registry.model_status(model_id)) \
+            if model_id is not None else generator_registry.active_status
+        status = status_reader()
         if not status["loaded"]:
             active = status
             model_name = active['name']
@@ -256,12 +305,13 @@ async def _run_generation(
             )
             load_thread.start()
             try:
-                gen = await loop.run_in_executor(None, get_generator)
+                gen = get_generator()
             finally:
                 stop_load_evt.set()
         else:
-            gen = await loop.run_in_executor(None, get_generator)
+            gen = get_generator()
 
+        _job_generators[job_id] = gen
         if job_id in _cancelled:
             return
 
@@ -278,18 +328,18 @@ async def _run_generation(
             model_input = revalidate_artifact_input(registry.WORKSPACE_DIR, model_input)
             import inspect
             supports_cancel = "cancel_event" in inspect.signature(gen.generate_artifact).parameters
-            output_path = await loop.run_in_executor(
-                None,
-                lambda: gen.generate_artifact(model_input.kind, model_input.path, params, progress_cb, cancel_event)
-                        if supports_cancel else gen.generate_artifact(model_input.kind, model_input.path, params, progress_cb),
+            output_path = (
+                gen.generate_artifact(model_input.kind, model_input.path, params, progress_cb, cancel_event)
+                if supports_cancel
+                else gen.generate_artifact(model_input.kind, model_input.path, params, progress_cb)
             )
         else:
             import inspect
             supports_cancel = "cancel_event" in inspect.signature(gen.generate).parameters
-            output_path = await loop.run_in_executor(
-                None,
-                lambda: gen.generate(model_input, params, progress_cb, cancel_event)
-                        if supports_cancel else gen.generate(model_input, params, progress_cb),
+            output_path = (
+                gen.generate(model_input, params, progress_cb, cancel_event)
+                if supports_cancel
+                else gen.generate(model_input, params, progress_cb)
             )
 
         if job_id in _cancelled:
@@ -328,3 +378,5 @@ async def _run_generation(
         job.status = "error"
         job.error  = tb.strip()
         _completed_at[job_id] = time.monotonic()
+    finally:
+        _job_generators.pop(job_id, None)

@@ -170,11 +170,13 @@ class BaseGenerator(ABC):
     ) -> Path:
         """Generate from a validated typed artifact.
 
-        New extensions should override this method. The default delegates to
-        ``generate`` with the canonical path so scene-capable extensions built
-        against the pre-release contract remain compatible.
+        Typed-artifact extensions must implement this explicitly. Falling back
+        to ``generate`` would pass a filesystem ``Path`` to the legacy
+        image-bytes ABI and fail far from the actual contract violation.
         """
-        return self.generate(artifact_path, params, progress_cb, cancel_event)  # type: ignore[arg-type]
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement {input_kind} artifact generation"
+        )
 
     def _check_cancelled(self, cancel_event: Optional[threading.Event]) -> None:
         """Raises GenerationCancelled if cancel_event is set."""

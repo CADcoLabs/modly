@@ -59,20 +59,20 @@ def _check_download_control(control: dict[str, threading.Event]) -> None:
 @router.get("/status")
 async def model_status():
     """Status of the active model."""
-    return generator_registry.active_status()
+    return await asyncio.to_thread(generator_registry.active_status)
 
 
 @router.get("/all")
 async def all_models_status():
     """Status of all known models (downloaded, loaded, required VRAM)."""
-    return generator_registry.all_status()
+    return await asyncio.to_thread(generator_registry.all_status)
 
 
 @router.get("/params")
 async def model_params(model_id: Optional[str] = None):
     """Parameter schema of the active model (or a specified model)."""
     try:
-        return generator_registry.params_schema(model_id)
+        return await asyncio.to_thread(generator_registry.params_schema, model_id)
     except KeyError:
         raise HTTPException(404, f"Unknown model ID: {model_id}")
 
@@ -81,7 +81,7 @@ async def model_params(model_id: Optional[str] = None):
 async def switch_model(model_id: str):
     """Switch the active model."""
     try:
-        generator_registry.switch_model(model_id)
+        await asyncio.to_thread(generator_registry.switch_model, model_id)
         return {"active": model_id}
     except ValueError as e:
         raise HTTPException(400, str(e))

@@ -68,7 +68,7 @@ const IO_STYLES: Record<'image' | 'text' | 'mesh' | 'audio' | 'scene', string> =
   image: 'bg-sky-500/15 text-sky-400 border-sky-500/25',
   mesh:  'bg-violet-500/15 text-violet-400 border-violet-500/25',
   text:  'bg-amber-500/15 text-amber-400 border-amber-500/25',
-  scene: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/25',
+  scene: 'bg-pink-500/15 text-pink-400 border-pink-500/25',
 }
 
 function IoBadge({ type }: { type: 'image' | 'text' | 'mesh' | 'audio' | 'scene' }) {
@@ -101,7 +101,7 @@ const PANEL_BUILTIN_NODES = [
   { type: 'imageNode',   label: 'Image',         color: '#38bdf8', icon: <><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></> },
   { type: 'textNode',    label: 'Text',           color: '#fbbf24', icon: <><path d="M17 6.1H3M21 12.1H3M15.1 18H3"/></> },
   { type: 'meshNode',    label: 'Load 3D Mesh',   color: '#a78bfa', icon: <><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></> },
-  { type: 'sceneNode',   label: 'Load Scene',     color: '#34d399', icon: <><path d="M4 7h16"/><path d="M7 4h10v16H7z"/></> },
+  { type: 'sceneNode',   label: 'Load Scene',     color: '#f472b6', icon: <><path d="M4 7h16"/><path d="M7 4h10v16H7z"/></> },
   { type: 'outputNode',  label: 'Add to Scene',   color: '#a78bfa', icon: <><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></> },
   { type: 'previewNode', label: 'Preview Views',  color: '#38bdf8', icon: <><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></> },
   { type: 'imagePreviewNode', label: 'Preview Image',  color: '#38bdf8', icon: <><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></> },
@@ -349,7 +349,7 @@ const BUILTIN_NODES = [
   { type: 'imageNode',   label: 'Image',         color: '#38bdf8', description: 'Image input' },
   { type: 'textNode',    label: 'Text',           color: '#fbbf24', description: 'Text input' },
   { type: 'meshNode',    label: 'Load 3D Mesh',   color: '#a78bfa', description: 'Load a 3D mesh file or use current model' },
-  { type: 'sceneNode',   label: 'Load Scene',     color: '#34d399', description: 'Load and validate a workspace scene directory' },
+  { type: 'sceneNode',   label: 'Load Scene',     color: '#f472b6', description: 'Load and validate a workspace scene directory' },
   { type: 'outputNode',  label: 'Add to Scene',   color: '#a78bfa', description: 'Output node — adds the mesh to the 3D scene' },
   { type: 'previewNode', label: 'Preview Views',  color: '#38bdf8', description: 'Displays multi-view image outputs in a 2×3 grid' },
   { type: 'imagePreviewNode', label: 'Preview Image',  color: '#38bdf8', description: 'Displays a single image output in the workflow' },
@@ -1379,7 +1379,7 @@ const MINI_NODE_TINTS: Record<string, { fill: string; stroke: string }> = {
   imageNode:     { fill: 'rgba(52,211,153,0.22)',  stroke: '#34d399' },
   textNode:      { fill: 'rgba(52,211,153,0.22)',  stroke: '#34d399' },
   meshNode:      { fill: 'rgba(52,211,153,0.22)',  stroke: '#34d399' },
-  sceneNode:     { fill: 'rgba(52,211,153,0.22)',  stroke: '#34d399' },
+  sceneNode:     { fill: 'rgba(244,114,182,0.22)', stroke: '#f472b6' },
   extensionNode: { fill: 'rgba(167,139,250,0.24)', stroke: '#a78bfa' },
   outputNode:    { fill: 'rgba(56,189,248,0.22)',  stroke: '#38bdf8' },
   previewNode:   { fill: 'rgba(56,189,248,0.22)',  stroke: '#38bdf8' },

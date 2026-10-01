@@ -8,7 +8,11 @@ import { join, resolve } from 'node:path'
 
 const outfile = join(mkdtempSync(join(tmpdir(), 'modly-scene-source-')), 'scene.cjs')
 writeFileSync(outfile, buildSync({ entryPoints: [resolve('src/areas/workflows/workflowSceneSource.ts')], bundle: true, platform: 'node', format: 'cjs', write: false }).outputFiles[0].text)
-const { resolveSceneSourceManifest } = createRequire(import.meta.url)(outfile)
+const {
+  applySceneValidationResult,
+  invalidateValidatedScenePath,
+  resolveSceneSourceManifest,
+} = createRequire(import.meta.url)(outfile)
 const encoded = Buffer.from(JSON.stringify({ schema: 'modly.scene-manifest.v1', sceneRoot: '.', assets: [] })).toString('base64')
 
 test('Load Scene resolves directory and manifest without image bytes', async () => {
@@ -26,4 +30,41 @@ test('Load Scene refuses unsafe paths before reading', async () => {
     assert.equal(result.ok, false, scenePath)
   }
   assert.equal(reads, 0)
+})
+
+test('editing a validated Load Scene path clears every derived scene reference', () => {
+  const params = invalidateValidatedScenePath({
+    path: 'Workflows/old',
+    manifestPath: 'Workflows/old/scene-manifest.json',
+    sceneRoot: '.',
+    sourceKind: 'directory',
+  }, 'Workflows/new')
+
+  assert.equal(params.path, 'Workflows/new')
+  assert.equal(params.manifestPath, undefined)
+  assert.equal(params.sceneRoot, undefined)
+  assert.equal(params.sourceKind, undefined)
+})
+
+test('an async validation result cannot overwrite a subsequently edited path', async () => {
+  const oldResolution = await resolveSceneSourceManifest({
+    scenePath: 'Workflows/old',
+    workspaceDir: '/workspace',
+    readFileBase64: async () => encoded,
+  })
+  assert.equal(oldResolution.ok, true)
+
+  const currentParams = invalidateValidatedScenePath({
+    path: 'Workflows/old',
+    manifestPath: 'Workflows/old/scene-manifest.json',
+    sceneRoot: '.',
+    sourceKind: 'directory',
+  }, 'Workflows/new')
+
+  assert.equal(
+    applySceneValidationResult(currentParams, 'Workflows/old', oldResolution),
+    undefined,
+  )
+  assert.equal(currentParams.path, 'Workflows/new')
+  assert.equal(currentParams.manifestPath, undefined)
 })

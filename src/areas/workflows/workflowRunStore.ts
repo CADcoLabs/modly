@@ -7,6 +7,7 @@ import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
 import { assignSlotFilePaths } from './slotInputs'
+import type { SlotInputType } from './slotInputs'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -337,7 +338,10 @@ async function executeExtensionNode(
   const incomingEdges = workflow.edges.filter((e) => e.target === node.id)
 
   if (ext?.inputs && ext.inputs.length > 1) {
-    const inputTypes  = ext.inputs
+    // Scene is intentionally a single-input-only model contract. The guard
+    // above rejects it before this multi-slot path, and filtering it here also
+    // narrows the remaining declarations to assignSlotFilePaths' exact ABI.
+    const inputTypes: SlotInputType[] = ext.inputs.filter((input) => input !== 'scene')
     // Resolved by target handle first, then typed by that slot's declared input --
     // not by the arrival order of `incomingEdges`, which does not match slot order.
     const inputPaths  = new Array<string | undefined>(inputTypes.length).fill(undefined)

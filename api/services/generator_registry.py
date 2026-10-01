@@ -452,19 +452,13 @@ def _discover_extensions(
                 node for node in raw_nodes
                 if isinstance(node, dict) and node.get("id")
             ]
-            allowed_io = {"image", "text", "mesh", "audio", "scene"}
             for node in nodes:
-                declared_inputs = node.get("inputs") or [node.get("input", "image")]
-                if (not isinstance(declared_inputs, list)
-                        or any(value not in allowed_io for value in declared_inputs)):
-                    raise ValueError(
-                        f'model node "{node.get("id", "unknown")}" has an unsupported input type'
-                    )
-                if node.get("output", "mesh") not in allowed_io:
-                    raise ValueError(
-                        f'model node "{node.get("id", "unknown")}" has an unsupported output type'
-                    )
-                if "scene" in declared_inputs and (
+                declared_inputs = node.get("inputs")
+                uses_scene_input = (
+                    node.get("input", "image") == "scene"
+                    or (isinstance(declared_inputs, list) and "scene" in declared_inputs)
+                )
+                if uses_scene_input and (
                     "inputs" in node or node.get("input", "image") != "scene"
                 ):
                     raise ValueError(
@@ -606,6 +600,7 @@ class GeneratorRegistry:
         self._generators: Dict[str, BaseGenerator] = {}
         self._manifests:  Dict[str, dict]          = {}
         self._errors:     Dict[str, str]           = {}
+        self._lifecycle_lock = threading.RLock()
         self._legacy_imports = _LegacyImportManager()
         self._active_id:  str = os.environ.get("SELECTED_MODEL_ID", "sf3d")
 
@@ -727,38 +722,47 @@ class GeneratorRegistry:
 
     def get_active(self) -> BaseGenerator:
         """Returns the active generator. Downloads and loads if necessary."""
-        return self.get_ready_generator(self._active_id)
+        with self._lifecycle_lock:
+            return self.get_ready_generator(self._active_id)
 
     def get_ready_generator(self, model_id: str) -> BaseGenerator:
         """Load and return exactly ``model_id`` without consulting active state."""
-        gen = self.get_generator(model_id)
-        downloaded = self._is_downloaded(model_id, gen)
-        if "model_sources" in self._manifests[model_id] and not downloaded:
-            raise RuntimeError(
-                "Model sources are incomplete. Download this node's weights "
-                "from the Modly Models page before generation."
-            )
-        if not gen.is_loaded():
-            if not downloaded:
-                if isinstance(gen, ExtensionProcess):
-                    # Let the subprocess handle its own download logic during
-                    # load() — some extensions (e.g. mv-adapter) need custom
-                    # multi-repo downloads that the standard HF endpoint can't do.
-                    pass
-                else:
-                    gen._auto_download()
-            gen.load()
-        return gen
+        with self._lifecycle_lock:
+            gen = self.get_generator(model_id)
+            downloaded = self._is_downloaded(model_id, gen)
+            if "model_sources" in self._manifests[model_id] and not downloaded:
+                raise RuntimeError(
+                    "Model sources are incomplete. Download this node's weights "
+                    "from the Modly Models page before generation."
+                )
+            if not gen.is_loaded():
+                if not downloaded:
+                    if isinstance(gen, ExtensionProcess):
+                        # Let the subprocess handle its own download logic during
+                        # load() — some extensions (e.g. mv-adapter) need custom
+                        # multi-repo downloads that the standard HF endpoint can't do.
+                        pass
+                    else:
+                        gen._auto_download()
+                gen.load()
+            return gen
+
+    def activate_ready_generator(self, model_id: str) -> BaseGenerator:
+        """Atomically make ``model_id`` active and return it ready for inference."""
+        with self._lifecycle_lock:
+            self.switch_model(model_id)
+            return self.get_ready_generator(model_id)
 
     def model_status(self, model_id: str) -> dict:
-        gen = self.get_generator(model_id)
-        manifest = self._manifests[model_id]
-        return {
-            "id": model_id,
-            "name": manifest.get("name", gen.DISPLAY_NAME),
-            "downloaded": self._is_downloaded(model_id, gen),
-            "loaded": gen.is_loaded(),
-        }
+        with self._lifecycle_lock:
+            gen = self.get_generator(model_id)
+            manifest = self._manifests[model_id]
+            return {
+                "id": model_id,
+                "name": manifest.get("name", gen.DISPLAY_NAME),
+                "downloaded": self._is_downloaded(model_id, gen),
+                "loaded": gen.is_loaded(),
+            }
 
     def get_generator(self, model_id: str) -> BaseGenerator:
         self._assert_not_quarantined(model_id)
@@ -777,16 +781,17 @@ class GeneratorRegistry:
 
     def switch_model(self, model_id: str) -> None:
         """Switches the active model. Unloads the previous one if different."""
-        self._assert_not_quarantined(model_id)
-        if model_id not in self._generators:
-            raise ValueError(
-                f"Unknown model ID: '{model_id}'. "
-                f"Available: {list(self._generators.keys())}"
-            )
-        if model_id != self._active_id:
-            if self._active_id in self._generators:
-                self._generators[self._active_id].unload()
-            self._active_id = model_id
+        with self._lifecycle_lock:
+            self._assert_not_quarantined(model_id)
+            if model_id not in self._generators:
+                raise ValueError(
+                    f"Unknown model ID: '{model_id}'. "
+                    f"Available: {list(self._generators.keys())}"
+                )
+            if model_id != self._active_id:
+                if self._active_id in self._generators:
+                    self._generators[self._active_id].unload()
+                self._active_id = model_id
 
     # ------------------------------------------------------------------ #
     # Status
@@ -801,31 +806,34 @@ class GeneratorRegistry:
         return gen.is_downloaded()
 
     def active_status(self) -> dict:
-        return self.model_status(self._active_id)
+        with self._lifecycle_lock:
+            return self.model_status(self._active_id)
 
     def all_status(self) -> list:
-        result = []
-        for model_id, gen in self._generators.items():
-            manifest = self._manifests[model_id]
-            result.append({
-                "id":          model_id,
-                "name":        manifest.get("name", gen.DISPLAY_NAME),
-                "description": manifest.get("description", ""),
-                "version":     manifest.get("version", ""),
-                "vram_gb":     manifest.get("vram_gb", gen.VRAM_GB),
-                "hf_repo":     manifest.get("hf_repo", ""),
-                "tags":        manifest.get("tags", []),
-                "downloaded":  self._is_downloaded(model_id, gen),
-                "loaded":      gen.is_loaded(),
-                "active":      model_id == self._active_id,
-            })
-        return result
+        with self._lifecycle_lock:
+            result = []
+            for model_id, gen in self._generators.items():
+                manifest = self._manifests[model_id]
+                result.append({
+                    "id":          model_id,
+                    "name":        manifest.get("name", gen.DISPLAY_NAME),
+                    "description": manifest.get("description", ""),
+                    "version":     manifest.get("version", ""),
+                    "vram_gb":     manifest.get("vram_gb", gen.VRAM_GB),
+                    "hf_repo":     manifest.get("hf_repo", ""),
+                    "tags":        manifest.get("tags", []),
+                    "downloaded":  self._is_downloaded(model_id, gen),
+                    "loaded":      gen.is_loaded(),
+                    "active":      model_id == self._active_id,
+                })
+            return result
 
     def params_schema(self, model_id: Optional[str] = None) -> list:
-        target_id = model_id or self._active_id
-        if target_id not in self._generators:
-            raise KeyError(target_id)
-        return self._generators[target_id].params_schema()
+        with self._lifecycle_lock:
+            target_id = model_id or self._active_id
+            if target_id not in self._generators:
+                raise KeyError(target_id)
+            return self._generators[target_id].params_schema()
 
     # ------------------------------------------------------------------ #
     # Paths update & shutdown

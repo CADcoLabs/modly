@@ -85,7 +85,7 @@ test('validateInstallManifest accepts multi-source nodes and preserves legacy sh
   }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'))
 })
 
-test('validateInstallManifest accepts scene IO and rejects undeclared future artifact kinds', () => {
+test('validateInstallManifest accepts scene IO without rejecting third-party artifact kinds', () => {
   const mod = loadModule()
   const files = { hasEntryFile: () => false, hasGeneratorFile: () => true }
   assert.doesNotThrow(() => mod.validateInstallManifest({
@@ -93,10 +93,10 @@ test('validateInstallManifest accepts scene IO and rejects undeclared future art
     nodes: [{ id: 'normalize', input: 'scene', output: 'scene' }],
   }, files, 'repository'))
   for (const input of ['capture', 'video']) {
-    assert.throws(() => mod.validateInstallManifest({
+    assert.doesNotThrow(() => mod.validateInstallManifest({
       id: 'future-model', generator_class: 'Generator',
       nodes: [{ id: 'future', input, output: 'scene' }],
-    }, files, 'repository'), /supported artifact type/)
+    }, files, 'repository'))
   }
 })
 

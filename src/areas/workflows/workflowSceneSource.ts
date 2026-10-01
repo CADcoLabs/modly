@@ -21,6 +21,47 @@ export type ResolveSceneSourceFailure = {
 
 export type ResolveSceneSourceResult = ResolveSceneSourceSuccess | ResolveSceneSourceFailure
 
+export function applySceneValidationResult(
+  currentParams: Record<string, unknown>,
+  validatedPath: string,
+  resolution: ResolveSceneSourceResult,
+): Record<string, unknown> | undefined {
+  if (currentParams.path !== validatedPath) return undefined
+
+  if (!resolution.ok) {
+    return {
+      ...currentParams,
+      manifestPath: undefined,
+      sceneRoot: undefined,
+      sourceKind: undefined,
+      error: resolution.error,
+    }
+  }
+
+  return {
+    ...currentParams,
+    path: resolution.inputWorkspacePath,
+    manifestPath: resolution.manifestWorkspacePath,
+    sceneRoot: resolution.sceneRoot,
+    sourceKind: resolution.sourceKind,
+    error: undefined,
+  }
+}
+
+export function invalidateValidatedScenePath(
+  params: Record<string, unknown>,
+  nextPath: string,
+): Record<string, unknown> {
+  return {
+    ...params,
+    path: nextPath,
+    manifestPath: undefined,
+    sceneRoot: undefined,
+    sourceKind: undefined,
+    error: undefined,
+  }
+}
+
 type ResolveSceneSourceArgs = {
   scenePath: string
   workspaceDir: string

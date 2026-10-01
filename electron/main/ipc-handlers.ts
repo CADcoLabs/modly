@@ -68,6 +68,7 @@ import {
 } from './extension-install-recovery'
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
 import { updatesSupported } from './updater'
+import { readLocalFileBase64 } from './bounded-file-reader'
 
 type WindowGetter = () => BrowserWindow | null
 const pExecFile = promisify(execFile)
@@ -379,13 +380,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // Read local file → base64 (bypasses file:// restrictions in the renderer)
-  ipcMain.handle('fs:readFileBase64', async (_, filePath: string) => {
-    if (typeof filePath !== 'string' || filePath.trim().length === 0) {
-      throw new Error('fs:readFileBase64 requires a non-empty file path')
-    }
-    const buffer = await readFile(filePath)
-    return buffer.toString('base64')
-  })
+  ipcMain.handle('fs:readFileBase64', (_, filePath: string) => readLocalFileBase64(filePath))
 
   ipcMain.handle('fs:readScreenshotDataUrl', async (_, filename: string) => {
     const filePath = app.isPackaged
@@ -845,10 +840,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     nodes?: {
       id:                string
       name?:             string
-      input?:            'mesh' | 'image' | 'text' | 'audio' | 'scene'
-      inputs?:           ('mesh' | 'image' | 'text' | 'audio' | 'scene')[]
+      input?:            string
+      inputs?:           string[]
       input_labels?:     string[]
-      output?:           'mesh' | 'image' | 'text' | 'audio' | 'scene'
+      output?:           string
       params_schema?:    unknown[]
       param_defaults?:   Record<string, unknown>
       hf_repo?:          string
@@ -874,14 +869,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     if (parsed.model_sources !== undefined) {
       throw new Error('manifest.json: model_sources must be declared on a model node')
     }
-    const allowedIo = new Set(['image', 'text', 'mesh', 'audio', 'scene'])
     const nodes = (parsed.nodes ?? []).map(n => {
-      const declaredInputs = n.inputs ?? [n.input ?? 'image']
-      for (const input of declaredInputs) {
-        if (!allowedIo.has(input)) throw new Error(`manifest.json: unsupported node input type "${input}"`)
-      }
+      const declaredInputs = Array.isArray(n.inputs) ? n.inputs : [n.input ?? 'image']
       const output = n.output ?? 'mesh'
-      if (!allowedIo.has(output)) throw new Error(`manifest.json: unsupported node output type "${output}"`)
       assertSupportedSceneNodeShape(parsed.type === 'process' ? 'process' : 'model', n, declaredInputs, output)
       if (parsed.type === 'process' && n.model_sources !== undefined) {
         throw new Error('manifest.json: model_sources is supported only for model nodes')
