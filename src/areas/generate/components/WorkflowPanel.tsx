@@ -13,6 +13,7 @@ import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { useWaitButton } from '@areas/workflows/useWaitButton'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
 import { validateWorkflowPreflight } from '@areas/workflows/preflight'
+import { mimeFromPath } from '@areas/workflows/nodes/imageUtils'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
 import { PICKER_LABELS, openParamPicker, resolvePickerIntent } from '@shared/utils/paramPicker'
@@ -28,6 +29,8 @@ const TYPE_COLOR: Record<string, string> = {
   mesh:  '#a78bfa',
   text:  '#fbbf24',
 }
+
+const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -52,13 +55,6 @@ function topoSortNodes(nodes: Workflow['nodes'], edges: Workflow['edges']): WFNo
     }
   }
   return result
-}
-
-function mimeFromPath(p: string): string {
-  const ext = p.split('.').pop()?.toLowerCase() ?? ''
-  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
-  if (ext === 'webp') return 'image/webp'
-  return 'image/png'
 }
 
 // ─── Param field ──────────────────────────────────────────────────────────────
@@ -212,17 +208,40 @@ function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: Flow
   const node     = nodes.find((n) => n.id === nodeId)
   const data     = node?.data as { params: Record<string, unknown> } | undefined
   const preview  = data?.params.preview as string | undefined
+  const showToast = useAppStore((state) => state.showToast)
+  const loadRequest = useRef(0)
+
+  const applyImagePath = useCallback(async (path: string | null) => {
+    const request = ++loadRequest.current
+    if (!path) return
+    try {
+      const base64 = await window.electron.fs.readFileBase64(path)
+      if (request !== loadRequest.current) return
+      const src = `data:${mimeFromPath(path)};base64,${base64}`
+      onPatch(nodeId, { params: { ...(data?.params ?? {}), filePath: path, preview: src } })
+    } catch {
+      if (request === loadRequest.current) showToast('Unable to load the selected image')
+    }
+  }, [nodeId, data?.params, onPatch, showToast])
 
   const browse = useCallback(async () => {
-    const p = await window.electron.fs.selectImage()
-    if (!p) return
-    const base64 = await window.electron.fs.readFileBase64(p)
-    const src = `data:${mimeFromPath(p)};base64,${base64}`
-    onPatch(nodeId, { params: { ...(data?.params ?? {}), filePath: p, preview: src } })
-  }, [nodeId, data?.params, onPatch])
+    await applyImagePath(await window.electron.fs.selectImage())
+  }, [applyImagePath])
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div
+      className="flex flex-col gap-1.5"
+      onDragOver={(event) => {
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+      }}
+      onDrop={(event) => {
+        event.preventDefault()
+        const file = event.dataTransfer.files[0]
+        if (!file || !SUPPORTED_IMAGE_TYPES.has(file.type)) return
+        void applyImagePath(window.electron.fs.getPathForFile(file))
+      }}
+    >
       <div className="flex items-center gap-1.5">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" strokeWidth="2">
           <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>

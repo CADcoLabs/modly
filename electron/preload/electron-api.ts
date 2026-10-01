@@ -17,7 +17,9 @@ export interface WebFrameLike {
   setZoomFactor(factor: number): void
 }
 
-export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFrameLike) {
+export type WebUtilsLike = Pick<typeof import('electron').webUtils, 'getPathForFile'>
+
+export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFrameLike, webUtils: WebUtilsLike) {
   return {
     // Window controls
     window: {
@@ -73,6 +75,8 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
 
     // File system dialogs + local file reading
     fs: {
+      getPathForFile:    (file: Parameters<WebUtilsLike['getPathForFile']>[0]): string =>
+        webUtils.getPathForFile(file),
       selectImage:       (): Promise<string | null> =>
         ipcRenderer.invoke('fs:selectImage') as Promise<string | null>,
       selectMeshFile:    (): Promise<string | null> =>

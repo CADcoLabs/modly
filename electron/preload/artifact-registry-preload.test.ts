@@ -13,7 +13,7 @@ test('preload exposes scoped workspace library list/read/open methods', async ()
     send: () => undefined,
     on: () => undefined,
     removeAllListeners: () => undefined,
-  }, { setZoomFactor: () => undefined })
+  }, { setZoomFactor: () => undefined }, { getPathForFile: () => '' })
 
   await api.workspace.library.list()
   await api.workspace.library.read({
@@ -42,4 +42,28 @@ test('preload exposes scoped workspace library list/read/open methods', async ()
       },
     },
   ])
+})
+
+test('preload resolves dropped file paths through Electron webUtils', () => {
+  const files: unknown[] = []
+  const calls: string[] = []
+  const api = createElectronApi({
+    invoke: async (channel: string) => {
+      calls.push(channel)
+      return null
+    },
+    send: () => undefined,
+    on: () => undefined,
+    removeAllListeners: () => undefined,
+  }, { setZoomFactor: () => undefined }, {
+    getPathForFile: (file) => {
+      files.push(file)
+      return 'C:\\images\\input.png'
+    },
+  })
+  const file = {} as Parameters<typeof api.fs.getPathForFile>[0]
+
+  assert.equal(api.fs.getPathForFile(file), 'C:\\images\\input.png')
+  assert.deepEqual(files, [file])
+  assert.deepEqual(calls, [])
 })
