@@ -3,7 +3,7 @@ import axios, { AxiosInstance } from 'axios'
 import { useAppStore } from '@shared/stores/appStore'
 import { getWorkflowExtension } from './mockExtensions'
 import { hasUnsupportedSceneShape } from './sceneShape'
-import { showCompletionNotification } from '@shared/utils/notification'
+import { showCompletionNotification, showErrorNotification } from '@shared/utils/notification'
 import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
@@ -973,6 +973,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         if (!_cancel.current) {
           set((s) => ({ runState: { ...s.runState, status: 'error', error: String(err) }, activeNodeId: null }))
           useAppStore.getState().updateCurrentJob({ status: 'error', error: String(err) })
+          void showErrorNotification(String(err), 'Workflow run failed')
         }
       }
     },
