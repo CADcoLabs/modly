@@ -523,8 +523,11 @@ def _discover_extensions(
                         registration_authorization is not None
                         and registration_authorization[0] == ext_id
                         and registration_authorization[1].exists()
+                        # Normalize like the capability's destination (resolved
+                        # root + name): EXTENSIONS_DIR may be a Windows 8.3 short
+                        # path. The extension folder itself is not resolved.
                         and registration_authorization[2]
-                        == Path(os.path.abspath(ext_dir))
+                        == Path(os.path.abspath(ext_dir.parent.resolve() / ext_dir.name))
                     )
                 )
             )

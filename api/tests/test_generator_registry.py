@@ -686,6 +686,27 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         self.assertNotIn("pending-update/generate", self.registry._generators)
         self.assertIn("pending-update/generate", self.registry.load_errors())
 
+    @unittest.skipUnless(sys.platform == "win32", "8.3 short paths are Windows-only")
+    def test_valid_capability_authorizes_extension_under_a_short_path(self) -> None:
+        # GitHub's Windows runners use an 8.3 TEMP (C:\Users\RUNNER~1\...): the
+        # capability destination is resolved (long form) while discovery walks
+        # the configured, short-form EXTENSIONS_DIR.
+        import ctypes
+
+        capability = self._make_loadable_pending_extension("pending-short")
+        buffer = ctypes.create_unicode_buffer(32768)
+        if not ctypes.windll.kernel32.GetShortPathNameW(str(self.extensions_dir), buffer, len(buffer)):
+            self.skipTest("short path unavailable")
+        short_dir = Path(buffer.value)
+        if str(short_dir) == str(self.extensions_dir):
+            self.skipTest("8.3 names are disabled on this volume")
+        registry_module.EXTENSIONS_DIR = short_dir
+
+        self.registry.reload(capability)
+
+        self.assertIn("pending-short/generate", self.registry._generators)
+        self.assertEqual(self.registry.load_errors(), {})
+
     def test_public_reload_and_predictable_id_cannot_bypass_pending_state(self) -> None:
         self._make_loadable_pending_extension("pending-public")
 
