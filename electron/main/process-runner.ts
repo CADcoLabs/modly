@@ -115,6 +115,11 @@ export class ProcessRunner implements IProcessRunner {
       worker.once('error', (err) => {
         reject(err)
       })
+
+      // A worker can also die between runs (e.g. a timer the processor left
+      // behind throws after it returned). Forget it whenever it exits, so the
+      // next run starts a fresh one instead of posting into a dead thread.
+      worker.once('exit', () => this.discardWorker(worker))
     })
   }
 

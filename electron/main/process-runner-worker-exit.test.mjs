@@ -4,7 +4,8 @@
  * processor call, running out of memory on a large mesh, process.exit() -- it
  * never posts 'done' or 'error'. The run must settle with an error instead of
  * leaving the workflow waiting forever, and the next run must get a fresh
- * worker rather than posting into the dead one.
+ * worker rather than posting into the dead one -- including when the worker
+ * died while idle, between two runs.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -13,9 +14,9 @@ import { createRequire } from 'node:module'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import vm from 'node:vm'
 
 function loadModule() {
-  const outfile = join(mkdtempSync(join(tmpdir(), 'modly-worker-exit-test-')), 'process-runner.cjs')
   const require = createRequire(import.meta.url)
   const result = buildSync({
     entryPoints: [resolve('electron/main/process-runner.ts')],
@@ -23,9 +24,16 @@ function loadModule() {
     platform: 'node',
     format: 'cjs',
     write: false,
+    external: ['electron'],
   })
-  writeFileSync(outfile, result.outputFiles[0].text, 'utf8')
-  return require(outfile)
+  // process-runner imports electron's `app` (only the Python runner uses it);
+  // the real package cannot load outside Electron, so hand it a stub.
+  const module = { exports: {} }
+  const dependencies = (name) => (name === 'electron' ? { app: {} } : require(name))
+  vm.runInNewContext(result.outputFiles[0].text, {
+    module, exports: module.exports, require: dependencies, process, console, Buffer, setTimeout, clearTimeout,
+  })
+  return module.exports
 }
 
 // Behaves according to params.mode; `runs` counts runs served by this worker,
@@ -45,6 +53,8 @@ function makeRunner() {
     '    return new Promise(() => {})',
     '  }',
     "  if (params.mode === 'exit') process.exit(3)",
+    // Returns normally, then a timer it left behind kills the idle worker.
+    "  if (params.mode === 'late-crash') setTimeout(() => { throw new Error('late failure') }, 10)",
     '  return { text: String(runs) }',
     '}',
     '',
@@ -77,6 +87,19 @@ test('an error thrown by the processor still rejects with its message and keeps 
     await assert.rejects(runner.run({}, { mode: 'throw' }), { message: 'Error: bad input' })
     // Same worker thread: its run counter carried over instead of restarting.
     assert.deepEqual(await runner.run({}, { mode: 'ok' }), { text: '2' })
+  } finally {
+    runner.terminate()
+  }
+})
+
+test('a worker that dies between runs is replaced for the next run', { timeout: 5000 }, async () => {
+  const runner = makeRunner()
+  try {
+    // The run itself succeeds; the timer it leaves behind kills the idle worker.
+    assert.deepEqual(await runner.run({}, { mode: 'late-crash' }), { text: '1' })
+    await new Promise((settle) => setTimeout(settle, 200))
+    // A fresh worker serves the next run (counter restarts) instead of hanging.
+    assert.deepEqual(await runner.run({}, { mode: 'ok' }), { text: '1' })
   } finally {
     runner.terminate()
   }
