@@ -47,6 +47,12 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     // Shell utilities
     shell: { openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url) },
 
+    // Slicer integration — open a model in OrcaSlicer via its deeplink
+    slicer: {
+      open: (url: string): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke('slicer:open', url) as Promise<{ success: boolean; error?: string }>,
+    },
+
     // System info
     system: {
       memory: (): Promise<{ total: number; used: number; available: number }> =>
@@ -123,9 +129,9 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     model: {
       export:         (args: { outputUrl: string; format: string }) => ipcRenderer.invoke('model:export', args),
       listDownloaded: () => ipcRenderer.invoke('model:listDownloaded'),
-      isDownloaded:   (modelId: string, downloadCheck?: string) => ipcRenderer.invoke('model:isDownloaded', modelId, downloadCheck),
-      download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[]) =>
-        ipcRenderer.invoke('model:download', { repoId, modelId, skipPrefixes, includePrefixes }),
+      isDownloaded:   (modelId: string) => ipcRenderer.invoke('model:isDownloaded', modelId),
+      hasLocalData:    (modelId: string) => ipcRenderer.invoke('model:hasLocalData', modelId),
+      download:       (modelId: string) => ipcRenderer.invoke('model:download', modelId),
       pauseDownload:  (modelId: string) => ipcRenderer.invoke('model:pauseDownload', modelId),
       cancelDownload: (modelId: string) => ipcRenderer.invoke('model:cancelDownload', modelId),
       delete:         (modelId: string) => ipcRenderer.invoke('model:delete', modelId),

@@ -13,7 +13,16 @@ import {
   isModelDownloaded,
   listDownloadedModels,
   downloadModelFromHF,
+  downloadModelSourcesFromHF,
 } from './model-downloader'
+import { resolveInstalledModelDownloadPlan } from './model-download-plan'
+import {
+  areModelSourcesDownloaded,
+  modelHasLocalData,
+  normalizeModelSources,
+  removePartialDownloadArtifacts,
+  resolveModelRoot,
+} from './model-sources'
 import { getSettings, setSettings } from './settings-store'
 import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensureSslPatch } from './python-setup'
 import { logger } from './logger'
@@ -30,6 +39,8 @@ import {
   isInternalExtensionDirName,
   resolveExtensionPathWithinRoot,
 } from './extension-path-guard'
+import { detectGpuInfo, describeGpuInfo, torchFlavorFor, type GpuInfo } from './gpu-detect'
+import { SETUP_LAUNCHER_SOURCE } from './setup-launcher'
 import {
   assertCompatibleExtensionUpdateType,
   expectedModelIds,
@@ -60,61 +71,12 @@ import { updatesSupported } from './updater'
 type WindowGetter = () => BrowserWindow | null
 const pExecFile = promisify(execFile)
 
-// ─── GPU detect (best-effort, no Python required) ─────────────────────────────
-
-interface GpuInfo {
-  sm: number
-  cudaVersion: number
-  accelerator: 'cuda' | 'mps' | 'cpu'
-}
-
-function detectGpuInfo(): Promise<GpuInfo> {
-  if (process.platform === 'darwin' && process.arch === 'arm64') {
-    return Promise.resolve({ sm: 0, cudaVersion: 0, accelerator: 'mps' })
-  }
-
-  return new Promise((resolve) => {
-    // Query compute cap + driver version in one call
-    const proc = spawn('nvidia-smi', ['--query-gpu=compute_cap,driver_version', '--format=csv,noheader'], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-    let out = ''
-    proc.stdout?.on('data', (d: Buffer) => { out += d.toString() })
-    proc.on('close', (code) => {
-      if (code === 0) {
-        const line   = out.trim().split('\n')[0].trim()        // e.g. "8.6, 551.61"
-        const parts  = line.split(',').map(s => s.trim())
-        const sm     = Math.round(parseFloat(parts[0] ?? '') * 10)  // → 86
-        // Derive max supported CUDA version from driver version
-        // Driver ≥ 520 → CUDA 11.8, ≥ 525 → 12.0, ≥ 530 → 12.1, ≥ 535 → 12.2,
-        // ≥ 545 → 12.3, ≥ 550 → 12.4, ≥ 555 → 12.5, ≥ 560 → 12.6
-        const driverMajor = parseInt((parts[1] ?? '').split('.')[0] ?? '0', 10)
-        let cudaVersion = 118  // safe minimum
-        if      (driverMajor >= 570) cudaVersion = 128  // Blackwell (RTX 50xx, sm_120)
-        else if (driverMajor >= 560) cudaVersion = 126
-        else if (driverMajor >= 555) cudaVersion = 125
-        else if (driverMajor >= 550) cudaVersion = 124
-        else if (driverMajor >= 545) cudaVersion = 123
-        else if (driverMajor >= 535) cudaVersion = 122
-        else if (driverMajor >= 530) cudaVersion = 121
-        else if (driverMajor >= 525) cudaVersion = 120
-        else if (driverMajor >= 520) cudaVersion = 118
-        resolve({ sm: isNaN(sm) ? 86 : sm, cudaVersion, accelerator: 'cuda' })
-      } else {
-        resolve({ sm: 0, cudaVersion: 0, accelerator: 'cpu' })
-      }
-    })
-    proc.on('error', () => resolve({ sm: 0, cudaVersion: 0, accelerator: 'cpu' }))
-  })
-}
-
 // ─── Run an extension's setup.py directly (no FastAPI needed) ─────────────────
 
 function runExtensionSetup(
-  extDir:      string,
-  gpuSm:       number,
-  cudaVersion: number,
-  onLog?:      (line: string) => void,
+  extDir: string,
+  gpu:    GpuInfo,
+  onLog?: (line: string) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const userData  = app.getPath('userData')
@@ -128,113 +90,34 @@ function runExtensionSetup(
     const pipCacheDir = join(getSettings(userData).dependenciesDir, 'pip-cache')
     try { mkdirSync(pipCacheDir, { recursive: true }) } catch { /* pip creates it too */ }
 
-    const accelerator = process.platform === 'darwin' && process.arch === 'arm64' ? 'mps' : gpuSm > 0 ? 'cuda' : 'cpu'
+    const torchFlavor = torchFlavorFor(gpu.accelerator)
     const args = JSON.stringify({
       python_exe: pythonExe,
       ext_dir: extDir,
-      gpu_sm: gpuSm,
-      cuda_version: cudaVersion,
-      accelerator,
+      gpu_sm: gpu.sm,
+      cuda_version: gpu.cudaVersion,
+      accelerator: gpu.accelerator,
+      // Extensions that know about AMD branch on torch_flavor (the official
+      // hunyuan3d-mini one does). Those that don't get corrected by the ROCm
+      // shim in setup-launcher.ts instead.
+      torch_flavor: torchFlavor,
+      gfx_target: gpu.gfxTarget ?? '',
+      torch_index_url: gpu.torchIndexUrl ?? '',
       platform: process.platform,
       arch: process.arch,
     })
-    const launcher = `
-import runpy
-import subprocess
-import sys
-
-setup_py = sys.argv[1]
-setup_args = sys.argv[2:]
-
-_original_run = subprocess.run
-_original_check_call = subprocess.check_call
-_original_check_output = subprocess.check_output
-
-def _is_cuda_torch_index(value):
-    return isinstance(value, str) and value.startswith("https://download.pytorch.org/whl/cu")
-
-def _mentions_torch(command):
-    if not isinstance(command, (list, tuple)):
-        return False
-    return any(str(part).startswith(("torch==", "torchvision==", "torchaudio==")) for part in command)
-
-def _rewrite_command(command):
-    if sys.platform != "darwin" or not _mentions_torch(command):
-        return command
-    if not isinstance(command, (list, tuple)):
-        return command
-
-    rewritten = []
-    changed = False
-    i = 0
-    while i < len(command):
-        part = command[i]
-        text = str(part)
-        if text in ("--index-url", "-i", "--extra-index-url") and i + 1 < len(command) and _is_cuda_torch_index(str(command[i + 1])):
-            changed = True
-            i += 2
-            continue
-        if text.startswith("--index-url=") or text.startswith("--extra-index-url="):
-            value = text.split("=", 1)[1]
-            if _is_cuda_torch_index(value):
-                changed = True
-                i += 1
-                continue
-        rewritten.append(part)
-        i += 1
-
-    if changed:
-        print("[Modly setup compat] Removed CUDA-only PyTorch index on macOS; pip will use macOS wheels.", file=sys.stderr)
-        return rewritten
-    return command
-
-def _is_pip_command(command):
-    if not isinstance(command, (list, tuple)):
-        return False
-    return any("pip" in str(part).lower() for part in command[:3])
-
-def _strip_no_cache(command):
-    # Extension setup scripts often hardcode --no-cache-dir, which forces pip to
-    # re-download multi-GB wheels on every retry. Modly provides a shared cache
-    # via PIP_CACHE_DIR, so drop the flag and let pip use it.
-    if not _is_pip_command(command):
-        return command
-    if not any(str(part) == "--no-cache-dir" for part in command):
-        return command
-    print("[Modly setup compat] Removed --no-cache-dir so pip reuses the shared wheel cache.", file=sys.stderr)
-    return [part for part in command if str(part) != "--no-cache-dir"]
-
-def _transform_command(command):
-    return _strip_no_cache(_rewrite_command(command))
-
-def _patched_run(*args, **kwargs):
-    args = list(args)
-    if args:
-        args[0] = _transform_command(args[0])
-    return _original_run(*args, **kwargs)
-
-def _patched_check_call(*args, **kwargs):
-    args = list(args)
-    if args:
-        args[0] = _transform_command(args[0])
-    return _original_check_call(*args, **kwargs)
-
-def _patched_check_output(*args, **kwargs):
-    args = list(args)
-    if args:
-        args[0] = _transform_command(args[0])
-    return _original_check_output(*args, **kwargs)
-
-subprocess.run = _patched_run
-subprocess.check_call = _patched_check_call
-subprocess.check_output = _patched_check_output
-
-sys.argv = [setup_py] + setup_args
-runpy.run_path(setup_py, run_name="__main__")
-`
+    const launcher = SETUP_LAUNCHER_SOURCE
+    // The rewrite decision itself is made in gpu-detect.ts (and unit-tested
+    // there); the launcher above only applies what these carry.
     const proc = spawn(pythonExe, ['-c', launcher, setupPy, args], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env:   { ...process.env, PIP_CACHE_DIR: pipCacheDir },
+      env:   {
+        ...process.env,
+        PIP_CACHE_DIR:         pipCacheDir,
+        MODLY_TORCH_FLAVOR:    torchFlavor,
+        MODLY_TORCH_INDEX_URL: gpu.torchIndexUrl ?? '',
+        MODLY_TORCH_SPECS:     JSON.stringify(gpu.torchSpecs ?? []),
+      },
     })
 
     const handleLine = (line: string) => { if (line) onLog?.(line) }
@@ -265,7 +148,12 @@ const renameWithRetry = (from: string, to: string, label: string) =>
   renameExtensionWithRetry(from, to, label, logger)
 
 export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGetter): void {
-  const activeDownloads = new Map<string, { percent: number; file?: string; fileIndex?: number; totalFiles?: number }>()
+  type ActiveDownload = {
+    progress: { percent: number; file?: string; fileIndex?: number; totalFiles?: number }
+    done: Promise<void>
+    finish: () => void
+  }
+  const activeDownloads = new Map<string, ActiveDownload>()
   // Logging from renderer
   ipcMain.on('log:error', (_event, message: string) => logger.error(`[Renderer] ${message}`))
   ipcMain.handle('log:getPath', () => join(app.getPath('userData'), 'logs', 'modly.log'))
@@ -446,7 +334,21 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   ipcMain.handle('model:delete', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
-    const modelDir = join(getSettings(app.getPath('userData')).modelsDir, modelId)
+    if (activeDownloads.has(modelId)) {
+      return { success: false, error: 'Cannot remove model weights while their download is active' }
+    }
+    let modelDir: string
+    try {
+      await resolveInstalledModelDownloadPlan({
+        modelId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      modelDir = resolveModelRoot(getSettings(app.getPath('userData')).modelsDir, modelId)
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
 
     // Unload the model and wait for confirmation so file handles are released
     try {
@@ -498,28 +400,74 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     return listDownloadedModels(modelsDir)
   })
 
-  ipcMain.handle('model:isDownloaded', (_, modelId: string, downloadCheck?: string): boolean => {
+  ipcMain.handle('model:isDownloaded', async (_, modelId: string): Promise<boolean> => {
     const modelsDir = getSettings(app.getPath('userData')).modelsDir
-    return isModelDownloaded(modelsDir, modelId, downloadCheck)
+    try {
+      const plan = await resolveInstalledModelDownloadPlan({
+        modelId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      return plan.kind === 'multi-source'
+        ? areModelSourcesDownloaded(modelsDir, modelId, plan.sources)
+        : isModelDownloaded(modelsDir, modelId, plan.downloadCheck)
+    } catch {
+      return false
+    }
+  })
+
+  ipcMain.handle('model:hasLocalData', async (_, modelId: string): Promise<boolean> => {
+    try {
+      await resolveInstalledModelDownloadPlan({
+        modelId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      return modelHasLocalData(getSettings(app.getPath('userData')).modelsDir, modelId)
+    } catch {
+      return false
+    }
   })
 
   ipcMain.handle('model:activeDownloads', () =>
-    [...activeDownloads.entries()].map(([modelId, progress]) => ({ modelId, ...progress }))
+    [...activeDownloads.entries()].map(([modelId, active]) => ({ modelId, ...active.progress }))
   )
 
   ipcMain.handle('model:download', async (
     event,
-    { repoId, modelId, skipPrefixes, includePrefixes }: { repoId: string; modelId: string; skipPrefixes?: string[]; includePrefixes?: string[] },
+    modelId: string,
   ) => {
     if (activeDownloads.has(modelId)) {
       return { success: false, error: 'Download already in progress' }
     }
-    activeDownloads.set(modelId, { percent: 0 })
+    let finish!: () => void
+    const done = new Promise<void>((resolveDone) => { finish = resolveDone })
+    const active: ActiveDownload = { progress: { percent: 0 }, done, finish }
+    activeDownloads.set(modelId, active)
     try {
-      await downloadModelFromHF(repoId, modelId, (progress) => {
-        activeDownloads.set(modelId, progress)
+      const plan = await resolveInstalledModelDownloadPlan({
+        modelId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      const onProgress = (progress: typeof active.progress) => {
+        active.progress = progress
         event.sender.send('model:downloadProgress', { modelId, ...progress })
-      }, skipPrefixes, includePrefixes)
+      }
+      if (plan.kind === 'multi-source') {
+        await downloadModelSourcesFromHF(modelId, plan.sources, onProgress)
+      } else {
+        await downloadModelFromHF(
+          plan.repoId,
+          modelId,
+          onProgress,
+          plan.skipPrefixes,
+          plan.includePrefixes,
+        )
+      }
       return { success: true }
     } catch (err: any) {
       const message = err?.message ?? String(err)
@@ -533,7 +481,8 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       }
       return { success: false, error: String(err) }
     } finally {
-      activeDownloads.delete(modelId)
+      if (activeDownloads.get(modelId) === active) activeDownloads.delete(modelId)
+      active.finish()
     }
   })
 
@@ -551,17 +500,27 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('model:cancelDownload', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
     try {
+      const active = activeDownloads.get(modelId)
       await axios.post(`${API_BASE_URL}/model/hf-download/cancel`, null, {
         params: { model_id: modelId },
         timeout: 5000,
       })
-      const modelDir = join(getSettings(app.getPath('userData')).modelsDir, modelId)
-      await rmAsync(modelDir, { recursive: true, force: true })
+      if (active) {
+        await Promise.race([
+          active.done,
+          new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error('Timed out waiting for the download to stop')), 30_000)
+          }),
+        ])
+      }
+      const modelDir = resolveModelRoot(getSettings(app.getPath('userData')).modelsDir, modelId)
+      // Only remove in-progress `.part` files — a model can now have multiple sources
+      // sharing this directory, and any source that already finished downloading
+      // must survive cancelling the ones still in flight.
+      await removePartialDownloadArtifacts(modelDir)
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
-    } finally {
-      activeDownloads.delete(modelId)
     }
   })
 
@@ -594,6 +553,26 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   // Shell
   ipcMain.handle('shell:openExternal', (_, url: string) => shell.openExternal(url))
+
+  // Open a model in OrcaSlicer via its orcaslicer://open?file=<url> deeplink.
+  //
+  // The returned error only covers the shell refusing the call outright. It is
+  // NOT an install check: on Windows an unregistered scheme still makes
+  // ShellExecuteEx succeed — the OS shows its own "You'll need a new app to open
+  // this orcaslicer link" dialog and this resolves with success. Detecting a
+  // missing OrcaSlicer would take a per-platform handler probe (registry on
+  // Windows), so the renderer must not promise the user that it knows.
+  ipcMain.handle('slicer:open', async (_, url: string): Promise<{ success: boolean; error?: string }> => {
+    if (typeof url !== 'string' || !url.startsWith('orcaslicer://')) {
+      return { success: false, error: 'slicer:open requires an orcaslicer:// URL' }
+    }
+    try {
+      await shell.openExternal(url)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
 
   // App info
   // System memory (used/available/total bytes).
@@ -858,6 +837,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     // extension type
     type?:  'model' | 'process'
     entry?: string
+    model_sources?: unknown
     // Optional top-level fallbacks — applied to each node if not set on the node
     params_schema?:  unknown[]
     param_defaults?: Record<string, unknown>
@@ -874,6 +854,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       download_check?:   string
       hf_skip_prefixes?: string[]
       hf_include_prefixes?: string[]
+      model_sources?: unknown
     }[]
   }
 
@@ -889,20 +870,30 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       builtin,
     }
 
-    const nodes = (parsed.nodes ?? []).map(n => ({
-      id:             n.id,
-      name:           n.name ?? n.id,
-      input:          n.input  ?? 'image' as const,
-      inputs:         n.inputs,
-      inputLabels:    n.input_labels,
-      output:         n.output ?? 'mesh'  as const,
-      paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
-      paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
-      hfRepo:         n.hf_repo,
-      downloadCheck:  n.download_check,
-      hfSkipPrefixes: n.hf_skip_prefixes,
-      hfIncludePrefixes: n.hf_include_prefixes,
-    }))
+    if (parsed.model_sources !== undefined) {
+      throw new Error('manifest.json: model_sources must be declared on a model node')
+    }
+    const nodes = (parsed.nodes ?? []).map(n => {
+      if (parsed.type === 'process' && n.model_sources !== undefined) {
+        throw new Error('manifest.json: model_sources is supported only for model nodes')
+      }
+      const modelSources = normalizeModelSources(n)
+      return {
+        id:             n.id,
+        name:           n.name ?? n.id,
+        input:          n.input  ?? 'image' as const,
+        inputs:         n.inputs,
+        inputLabels:    n.input_labels,
+        output:         n.output ?? 'mesh'  as const,
+        paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
+        paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
+        hfRepo:         n.hf_repo,
+        downloadCheck:  n.download_check,
+        hfSkipPrefixes: n.hf_skip_prefixes,
+        hfIncludePrefixes: n.hf_include_prefixes,
+        hasModelSources: modelSources !== undefined,
+      }
+    })
 
     if (parsed.type === 'process') {
       return { ...common, type: 'process' as const, entry: parsed.entry ?? 'processor.js', nodes }
@@ -1307,8 +1298,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
           // 7a. Python process extension: run setup.py if present (same as model extensions)
           if (existsSync(join(destDir, 'setup.py'))) {
             emit({ step: 'setting_up', message: 'Setting up Python environment…' })
-            const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+            const gpu = await detectGpuInfo({ onLog: (line) => logger.info(line) })
+            logger.info(`[ext-setup] ${describeGpuInfo(gpu)}`)
+            await runExtensionSetup(destDir, gpu, (line) => {
               logger.info(`[ext-setup] ${line}`)
               emit({ step: 'setting_up', message: line })
             })
@@ -1343,8 +1335,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
           // 7c. Model extension: run setup.py directly (no FastAPI required)
           if (existsSync(join(destDir, 'setup.py'))) {
             emit({ step: 'setting_up', message: 'Setting up Python environment…' })
-            const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+            const gpu = await detectGpuInfo({ onLog: (line) => logger.info(line) })
+            logger.info(`[ext-setup] ${describeGpuInfo(gpu)}`)
+            await runExtensionSetup(destDir, gpu, (line) => {
               logger.info(`[ext-setup] ${line}`)
               emit({ step: 'setting_up', message: line })
             })
@@ -1473,6 +1466,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Uninstall an extension — built-ins cannot be uninstalled
   ipcMain.handle('extensions:uninstall', async (_, extensionId: string) => {
     try {
+      if ([...activeDownloads.keys()].some((modelId) => modelId.split('/', 1)[0] === extensionId)) {
+        return { success: false, error: 'Cannot uninstall an extension while its model download is active' }
+      }
       // Corrupted folders can carry arbitrary names (manual copies, failed
       // unzips), so only enforce root confinement for the deletion path. The
       // strict id pattern still guards the built-in check — a non-conforming
@@ -1533,7 +1529,8 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         },
         'extension folder',
       )
-      const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
+      const gpu = await detectGpuInfo({ onLog: (line) => logger.info(line) })
+      logger.info(`[ext-repair] ${describeGpuInfo(gpu)}`)
       await runExtensionRepairTransaction(
         {
           extensionsDir,
@@ -1548,8 +1545,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
           },
           setup: () => runExtensionSetup(
             extDir,
-            gpuSm,
-            cudaVersion,
+            gpu,
             (line) => logger.info(`[ext-repair] ${line}`),
           ),
           validate: async (validationCapability) => {

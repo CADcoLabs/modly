@@ -69,6 +69,9 @@ npm run build
 
 ## Platform notes
 
+- AMD GPUs are supported through ROCm on Linux and Windows: a Radeon card is detected
+  automatically and extensions are steered to ROCm PyTorch wheels, with no ROCm install
+  required. See [docs/running-on-amd-rocm.md](docs/running-on-amd-rocm.md).
 - macOS support targets Apple Silicon only.
 - macOS uses native window controls. Windows and Linux keep the existing custom controls.
 - The top bar includes a live RAM indicator sourced from the main process.
@@ -105,6 +108,45 @@ Modly supports external model and process extensions. Each extension is a GitHub
 **3.** If the extension exposes model nodes, download the model or one of its variants. Process extensions are ready once installation and setup complete.
 
 ![Install models](docs/install-models.png)
+
+### Multiple Hugging Face repositories per model node
+
+A model node whose weights are split across repositories can declare
+`model_sources`. Modly validates every source, downloads them sequentially in
+one Models-page action, and considers the node installed only when every
+declared check exists.
+
+```json
+{
+  "id": "generate",
+  "model_sources": [
+    {
+      "id": "primary",
+      "provider": "huggingface",
+      "repo_id": "org/main-model",
+      "destination": ".",
+      "checks": ["model.safetensors"]
+    },
+    {
+      "id": "encoder",
+      "provider": "huggingface",
+      "repo_id": "org/encoder",
+      "revision": "v1.0",
+      "destination": "auxiliary/encoder",
+      "include_prefixes": ["config.json", "model.safetensors"],
+      "checks": ["config.json", "model.safetensors"]
+    }
+  ]
+}
+```
+
+`destination`, filters, and checks use safe POSIX paths relative to the node's
+model directory. Every check must name a regular, non-empty file included by
+that source's filters; invalid plans fail before any file is downloaded. Pin a
+tag or commit in `revision` when reproducible weights are required. The only
+supported provider is `huggingface`. Existing nodes that use `hf_repo`,
+`download_check`, `hf_include_prefixes`, and `hf_skip_prefixes` keep their
+original behavior.
 
 ---
 
