@@ -12,6 +12,7 @@ export interface DownloadInfo {
   totalBytes?: number
   stalledSeconds?: number
   paused?: boolean
+  variantId?: string   // set when the download targets one weight variant of the node
 }
 
 export type DownloadMap = Record<string, DownloadInfo>
@@ -23,7 +24,7 @@ export type NodeUiState =
   | { kind: 'installed' }
 
 export function nodeHasManagedWeights(node: ExtensionNode): boolean {
-  return Boolean(node.hfRepo || node.hasModelSources)
+  return Boolean(node.hfRepo || node.hasModelSources || node.weightGroups?.length)
 }
 
 export function getNodeState(

@@ -1,6 +1,6 @@
 import type { ModelExtension, ProcessExtension } from '@shared/stores/extensionsStore'
 export type { ParamSchema } from '@shared/types/electron.d'
-import type { ParamSchema } from '@shared/types/electron.d'
+import type { ParamSchema, WeightVariantsInfo } from '@shared/types/electron.d'
 
 export interface WorkflowExtension {
   id:              string   // "ext_id/node_id"
@@ -10,13 +10,14 @@ export interface WorkflowExtension {
   nodeId:          string   // "node_id"
   name:            string
   description:     string
-  input:           'image' | 'text' | 'mesh' | 'audio'
-  inputs?:         ('image' | 'text' | 'mesh' | 'audio')[]   // multi-input; overrides input when set
+  input:           'image' | 'text' | 'mesh' | 'audio' | 'scene'
+  inputs?:         ('image' | 'text' | 'mesh' | 'audio' | 'scene')[]   // multi-input; overrides input when set
   inputLabels?:    string[]                                  // display labels per input slot
-  output:          'image' | 'text' | 'mesh' | 'audio'
+  output:          'image' | 'text' | 'mesh' | 'audio' | 'scene'
   params:          ParamSchema[]
   builtin:         boolean
   type:            'model' | 'process'
+  weightVariants?: WeightVariantsInfo
 }
 
 function applyParamDefaults(
@@ -77,6 +78,7 @@ export function buildAllWorkflowExtensions(
         params:          applyParamDefaults(node.paramsSchema as ParamSchema[], node.paramDefaults),
         builtin:         ext.builtin,
         type:            'model',
+        weightVariants:  node.weightVariants,
       })
     }
   }

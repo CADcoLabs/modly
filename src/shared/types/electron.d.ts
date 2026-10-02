@@ -14,10 +14,10 @@ import type {
 export interface ExtensionNode {
   id:               string
   name:             string
-  input:            'image' | 'text' | 'mesh' | 'audio'
-  inputs?:          ('image' | 'text' | 'mesh' | 'audio')[]   // multi-input nodes; overrides input when set
+  input:            'image' | 'text' | 'mesh' | 'audio' | 'scene'
+  inputs?:          ('image' | 'text' | 'mesh' | 'audio' | 'scene')[]   // multi-input nodes; overrides input when set
   inputLabels?:     string[]   // display labels per input slot (e.g. positive/negative)
-  output:           'image' | 'text' | 'mesh' | 'audio'
+  output:           'image' | 'text' | 'mesh' | 'audio' | 'scene'
   paramsSchema:     ParamSchema[]
   paramDefaults?:   Record<string, number | string>
   hfRepo?:          string
@@ -25,6 +25,19 @@ export interface ExtensionNode {
   hfSkipPrefixes?:  string[]
   hfIncludePrefixes?: string[]
   hasModelSources?: boolean
+  weightGroups?:    string[]
+  weightVariants?:  WeightVariantsInfo
+}
+
+export interface WeightVariantsInfo {
+  param:   string   // params_schema id whose value selects the variant
+  default: string
+  options: { id: string; label: string; sizeGb?: number; vramGb?: number }[]
+}
+
+export interface SharedWeightGroup {
+  id: string
+  dependentNodeIds: string[]
 }
 
 export interface ModelExtension {
@@ -39,6 +52,7 @@ export interface ModelExtension {
   source?:      string
   localPath?:   string
   nodes:        ExtensionNode[]
+  weightGroups?: SharedWeightGroup[]
   /** Folder exists but is not a loadable extension — see manifestError */
   corrupted?:   boolean
   /** Why the folder is corrupted: manifest gone, manifest unparseable, or install never completed */
@@ -155,6 +169,9 @@ declare global {
       shell: {
         openExternal: (url: string) => Promise<void>
       }
+      slicer: {
+        open: (url: string) => Promise<{ success: boolean; error?: string }>
+      }
       system: {
         memory: () => Promise<{ total: number; used: number; available: number }>
       }
@@ -181,6 +198,7 @@ declare global {
         offLog: () => void
       }
       fs: {
+        getPathForFile:  (file: File) => string
         selectImage:     () => Promise<string | null>
         selectMeshFile:  () => Promise<string | null>
         saveModel:       (defaultName: string) => Promise<string | null>
@@ -207,17 +225,24 @@ declare global {
       model: {
         export:         (args: { outputUrl: string; format: string }) => Promise<{ success: boolean; error?: string }>
         listDownloaded: () => Promise<{ id: string; name: string; size_gb: number }[]>
-        activeDownloads: () => Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]>
+        activeDownloads: () => Promise<{ modelId: string; variantId?: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]>
         isDownloaded:   (modelId: string) => Promise<boolean>
         hasLocalData:    (modelId: string) => Promise<boolean>
-        download:       (modelId: string) => Promise<{ success: boolean; error?: string; paused?: boolean; cancelled?: boolean }>
+        sharedGroups:    (extensionId: string) => Promise<SharedWeightGroupState[]>
+        download:       (modelId: string, variantId?: string) => Promise<{ success: boolean; error?: string; paused?: boolean; cancelled?: boolean }>
         pauseDownload:  (modelId: string) => Promise<{ success: boolean; error?: string }>
         cancelDownload: (modelId: string) => Promise<{ success: boolean; error?: string }>
         delete:         (modelId: string) => Promise<{ success: boolean; error?: string }>
+        deleteSharedGroup: (extensionId: string, groupId: string) => Promise<{ success: boolean; error?: string }>
+        deleteExtensionWeights: (extensionId: string) => Promise<{ success: boolean; error?: string }>
+        /** Installed variant ids, or null when the node's install state could not be read */
+        installedWeightVariants: (modelId: string) => Promise<string[] | null>
+        deleteWeightVariant: (modelId: string, variantId: string) => Promise<{ success: boolean; error?: string }>
         unloadAll:      () => Promise<{ success: boolean; error?: string }>
         showInFolder:   (modelId: string) => Promise<void>
         onProgress:     (cb: (data: {
           modelId: string
+          variantId?: string
           percent: number
           file?: string
           fileIndex?: number
@@ -230,6 +255,8 @@ declare global {
           cancelled?: boolean
         }) => void) => void
         offProgress:    () => void
+        onWeightsChanged: (cb: () => void) => void
+        offWeightsChanged: () => void
       }
       app: {
         info: () => Promise<{
@@ -321,4 +348,12 @@ declare global {
       }
     }
   }
+}
+
+export interface SharedWeightGroupState {
+  id: string
+  targetId: string
+  dependentModelIds: string[]
+  downloaded: boolean
+  hasLocalData: boolean
 }

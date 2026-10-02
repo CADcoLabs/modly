@@ -45,6 +45,7 @@ class ExtensionProcess:
         self.manifest      = manifest
         self.model_dir     = None   # set by registry after init
         self.outputs_dir   = None   # set by registry after init
+        self.shared_model_dirs: dict[str, Path] = {}
 
         self._proc:   Optional[subprocess.Popen] = None
         self._queue:  queue.Queue                = queue.Queue()
@@ -84,11 +85,17 @@ class ExtensionProcess:
             # Setting it inside generator.py is too late, since generator.py
             # itself imports torch before calling select_device().
             env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-        # Pass the exact model_dir so runner.py doesn't have to re-derive it
-        # from manifest["id"] (which is the ext_id, not the composite node id).
-        # runner.py extracts the node id from MODEL_DIR's trailing path component.
+        # Keep capability identity separate from storage identity. MODEL_DIR
+        # retains its node-private meaning; shared roots are passed explicitly.
         if self.model_dir is not None:
             env["MODEL_DIR"] = str(self.model_dir)
+        env["MODEL_ID"] = self.MODEL_ID
+        env["MODEL_NODE_ID"] = self.manifest.get(
+            "node_id", self.MODEL_ID.split("/", 1)[-1]
+        )
+        env["SHARED_MODEL_DIRS"] = json.dumps(
+            {group_id: str(path) for group_id, path in self.shared_model_dirs.items()}
+        )
         # Extension venvs are based on python-embed which ships without a CA bundle.
         # Only set SSL_CERT_FILE if not already provided (preserves corporate/custom certs).
         if "SSL_CERT_FILE" not in env:
@@ -291,16 +298,18 @@ class ExtensionProcess:
         progress_cb: Optional[Callable[[int, str], None]] = None,
         cancel_event: Optional[threading.Event] = None,
     ) -> Path:
-        from services.generators.base import GenerationCancelled
+        return self._generate_request(
+            {"image_b64": base64.b64encode(image_bytes).decode()},
+            params, progress_cb, cancel_event,
+        )
 
-        req_id = str(uuid.uuid4())
-        self._send({
-            "action":      "generate",
-            "id":          req_id,
-            "image_b64":   base64.b64encode(image_bytes).decode(),
-            "params":      params,
-            "outputs_dir": str(self.outputs_dir) if self.outputs_dir else None,
-        })
+    def _receive_generation(
+        self,
+        req_id: str,
+        progress_cb: Optional[Callable[[int, str], None]],
+        cancel_event: Optional[threading.Event],
+    ) -> Path:
+        from services.generators.base import GenerationCancelled
 
         # Grace period after sending a cooperative cancel before hard-killing
         # the subprocess. Long enough to let generators that check cancel_event
@@ -376,6 +385,41 @@ class ExtensionProcess:
 
             elif t == "log":
                 print(f"[{self.MODEL_ID}] {msg.get('message', '')}", file=sys.stderr)
+
+    def generate_artifact(
+        self,
+        input_kind: str,
+        artifact_path: Path,
+        params: dict,
+        progress_cb: Optional[Callable[[int, str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Path:
+        """Send a typed artifact envelope to the isolated runner."""
+        from services.artifact_input import TypedArtifactInput, revalidate_artifact_input
+        from services.generator_registry import WORKSPACE_DIR
+
+        validated = revalidate_artifact_input(
+            WORKSPACE_DIR, TypedArtifactInput(kind=input_kind, path=artifact_path)
+        )
+        return self._generate_request(
+            {"input": {"kind": validated.kind, "path": str(validated.path)}},
+            params, progress_cb, cancel_event,
+        )
+
+    def _generate_request(
+        self,
+        input_payload: dict,
+        params: dict,
+        progress_cb: Optional[Callable[[int, str], None]],
+        cancel_event: Optional[threading.Event],
+    ) -> Path:
+        req_id = str(uuid.uuid4())
+        self._send({
+            "action": "generate", "id": req_id, "model_id": self.MODEL_ID,
+            **input_payload, "params": params,
+            "outputs_dir": str(self.outputs_dir) if self.outputs_dir else None,
+        })
+        return self._receive_generation(req_id, progress_cb, cancel_event)
 
     def params_schema(self) -> list:
         return self._params_schema

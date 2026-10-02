@@ -5,6 +5,7 @@ import sys
 import json
 import tempfile
 import importlib
+from unittest.mock import patch
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -20,6 +21,30 @@ _select_node = runner._select_node
 
 
 class RunnerTests(unittest.TestCase):
+    def test_decode_typed_scene_revalidates_worker_workspace_and_keeps_legacy_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            scene = workspace / "Workflows" / "room"
+            scene.mkdir(parents=True)
+            manifest = scene / "scene-manifest.json"
+            manifest.write_text(json.dumps({
+                "schema": "modly.scene-manifest.v1", "sceneRoot": ".", "assets": [],
+            }))
+            with patch.object(runner, "WORKSPACE_DIR", workspace):
+                typed = runner.decode_model_input({"input": {"kind": "scene", "path": str(manifest)}})
+                self.assertEqual(typed.kind, "scene")
+                self.assertEqual(typed.path, manifest.resolve())
+                self.assertEqual(runner.decode_model_input({"image_b64": "aW1hZ2U="}), b"image")
+                with self.assertRaises(ValueError):
+                    runner.decode_model_input({"input": {"kind": "video", "path": str(manifest)}})
+
+    def test_runner_model_envelope_rejects_cross_node_dispatch(self) -> None:
+        manifest = {"id": "pixal3d"}
+        node = {"id": "worldsculpt"}
+        runner.validate_requested_model({"model_id": "pixal3d/worldsculpt"}, manifest, node)
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            runner.validate_requested_model({"model_id": "pixal3d/generate"}, manifest, node)
+
     def test_select_node_uses_model_dir_override(self) -> None:
         manifest = {
             "nodes": [
@@ -29,6 +54,17 @@ class RunnerTests(unittest.TestCase):
         }
 
         node = _select_node(manifest, str(Path("/tmp/ext/quality")))
+
+        self.assertEqual(node["id"], "quality")
+
+    def test_select_node_prefers_explicit_node_id_over_storage_path(self) -> None:
+        manifest = {"nodes": [{"id": "fast"}, {"id": "quality"}]}
+
+        node = _select_node(
+            manifest,
+            str(Path("/tmp/ext/_shared/base")),
+            "quality",
+        )
 
         self.assertEqual(node["id"], "quality")
 
@@ -237,6 +273,23 @@ class _RunnerDriver:
             if original_module is not None:
                 sys.modules["generator"] = original_module
         return [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+
+
+class RuntimeIdentityTests(unittest.TestCase):
+    def test_runner_exposes_selected_identity_independently_of_storage(self):
+        from unittest.mock import patch
+        driver = _RunnerDriver(_FAKE_TEXGEN_GENERATOR, "FakeTexGen")
+        manifest = {"id": "demo-ext", "generator_class": "FakeTexGen",
+                    "nodes": [{"id": "a"}, {"id": "b"}]}
+        (driver.ext_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        with patch.object(runner, "_MODEL_ID_OVERRIDE", "demo-ext/b"), \
+             patch.object(runner, "_MODEL_NODE_ID_OVERRIDE", "b"), \
+             patch.object(runner, "_MODEL_DIR_OVERRIDE", str(driver.ext_dir / "unrelated-storage")):
+            driver.run([])
+        gen = driver.generator_module.INSTANCES[0]
+        self.assertEqual(gen.MODEL_ID, "demo-ext/b")
+        self.assertEqual(gen.MODEL_NODE_ID, "b")
+        self.assertEqual(gen.model_dir.name, "unrelated-storage")
 
 
 class GeneratorLoadedStateTests(unittest.TestCase):

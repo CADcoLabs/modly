@@ -113,3 +113,149 @@ test('requires every declared check and rejects symlinked extension-root ancestr
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('validates extension-scoped groups and canonicalizes sibling references', () => {
+  const { normalizeWeightGroups, normalizeWeightGroupReferences } = loadModule()
+  const groups = normalizeWeightGroups({
+    weight_groups: [{
+      id: 'Base-Weights',
+      model_sources: validNode().model_sources,
+    }],
+  })
+  assert.deepEqual(
+    normalizeWeightGroupReferences({ weight_groups: ['base-weights'] }, groups),
+    ['Base-Weights'],
+  )
+  assert.throws(
+    () => normalizeWeightGroupReferences({ weight_groups: ['missing'] }, groups),
+    /unknown weight group/i,
+  )
+  assert.throws(
+    () => normalizeWeightGroups({
+      weight_groups: [
+        { id: 'base', model_sources: validNode().model_sources },
+        { id: 'BASE', model_sources: validNode().model_sources },
+      ],
+    }),
+    /portable-unique/i,
+  )
+})
+
+test('stores and checks shared weights under the reserved extension root', () => {
+  const {
+    areWeightGroupSourcesDownloaded,
+    normalizeWeightGroups,
+    resolveModelRoot,
+    resolveWeightGroupRoot,
+    resolveWeightStorageRoot,
+  } = loadModule()
+  const root = mkdtempSync(join(tmpdir(), 'modly-shared-readiness-'))
+  const models = join(root, 'models')
+  const [group] = normalizeWeightGroups({
+    weight_groups: [{
+      id: 'base',
+      model_sources: [{
+        id: 'primary', provider: 'huggingface', repo_id: 'org/base',
+        destination: '.', checks: ['model.bin'],
+      }],
+    }],
+  })
+  const groupRoot = join(models, 'demo', '_shared', 'base')
+  try {
+    assert.equal(resolveWeightGroupRoot(models, 'demo', 'base'), groupRoot)
+    assert.equal(resolveWeightStorageRoot(models, 'demo/_shared/base'), groupRoot)
+    assert.throws(() => resolveModelRoot(models, 'demo/_shared'), /reserved/i)
+    assert.equal(areWeightGroupSourcesDownloaded(models, 'demo', group), false)
+    mkdirSync(groupRoot, { recursive: true })
+    writeFileSync(join(groupRoot, 'model.bin'), 'weights')
+    assert.equal(areWeightGroupSourcesDownloaded(models, 'demo', group), true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+
+const quantNode = () => ({
+  hf_repo: 'org/model-gguf',
+  download_check: 'pipeline.json',
+  params_schema: [{
+    id: 'quant',
+    label: 'Quantization',
+    type: 'select',
+    default: 'Q5',
+    options: [{ value: 'Q4', label: 'Q4' }, { value: 'Q5', label: 'Q5' }],
+  }],
+  weight_variants: {
+    param: 'quant',
+    default: 'Q5',
+    options: ['Q4', 'Q5'].map((quant) => ({
+      id: quant,
+      include_prefixes: [`dit/model_${quant}.gguf`],
+      checks: [`dit/model_${quant}.gguf`],
+    })),
+  },
+})
+
+test('validates weight variants and rejects ambiguous or unsafe declarations', () => {
+  const { normalizeWeightVariants } = loadModule()
+  const variants = normalizeWeightVariants(quantNode())
+  assert.equal(variants.param, 'quant')
+  assert.equal(variants.default, 'Q5')
+  assert.deepEqual(variants.options.map((option) => option.label), ['Q4', 'Q5'])
+  assert.equal(normalizeWeightVariants({ hf_repo: 'org/model' }), undefined)
+
+  const node = quantNode()
+  const [q4, q5] = node.weight_variants.options
+  const withOptions = (options, extra = {}) => ({ ...node, weight_variants: { ...node.weight_variants, options, ...extra } })
+  const cases = [
+    [{ ...node, hf_repo: undefined }, /requires hf_repo/],
+    [{ ...node, model_sources: [] }, /cannot be combined/],
+    [{ ...node, weight_groups: ['base'] }, /cannot be combined with weight_groups/],
+    [{ ...node, download_check: 'dit/model_Q4.gguf' }, /download_check/],
+    [withOptions([q4, q5], { default: 'Q8' }), /default/],
+    [withOptions([q4, { ...q5, include_prefixes: ['dit/'] }]), /share files/],
+    [withOptions([q4, { ...q5, id: 'q4' }]), /portable-unique/],
+    [withOptions([{ ...q4, checks: ['other.gguf'] }]), /not covered/],
+    [withOptions([{ ...q4, include_prefixes: ['../outside'] }]), /unsafe/],
+    [withOptions([{ ...q4, size_gb: -1 }]), /size_gb/],
+    [withOptions([{ ...q4, vram_gb: 0 }]), /vram_gb/],
+    [withOptions([{ ...q4, vram_gb: '6' }]), /vram_gb/],
+    [{ ...node, params_schema: undefined }, /must name a params_schema entry/],
+    [{ ...node, params_schema: [{ id: 'steps', type: 'int' }] }, /must name a params_schema entry/],
+    [
+      { ...node, params_schema: [{ id: 'quant', type: 'select', options: [{ value: 'Q5' }] }] },
+      /must offer every weight variant id \(missing: Q4\)/,
+    ],
+  ]
+  for (const [candidate, error] of cases) assert.throws(() => normalizeWeightVariants(candidate), error)
+
+  // A param that declares no options (or an unknown shape) is left to the node.
+  assert.doesNotThrow(() => normalizeWeightVariants({ ...node, params_schema: [{ id: 'quant', type: 'string' }] }))
+  assert.equal('vram_gb' in variants.options[0], false)
+  assert.equal(normalizeWeightVariants(withOptions([{ ...q4, vram_gb: 6.5 }, q5])).options[0].vram_gb, 6.5)
+})
+
+test('reports installed variants and lists only the files of the variant being removed', async () => {
+  const { installedWeightVariants, listWeightVariantFiles, normalizeWeightVariants } = loadModule()
+  const variants = normalizeWeightVariants(quantNode())
+  const root = mkdtempSync(join(tmpdir(), 'modly-weight-variants-'))
+  const models = join(root, 'models')
+  const nodeRoot = join(models, 'trellis', 'generate')
+  mkdirSync(join(nodeRoot, 'dit'), { recursive: true })
+  writeFileSync(join(nodeRoot, 'pipeline.json'), '{}')
+  writeFileSync(join(nodeRoot, 'dit', 'model_Q5.gguf'), 'q5')
+  writeFileSync(join(nodeRoot, 'dit', 'model_Q4.gguf'), '')
+  writeFileSync(join(nodeRoot, 'dit', 'model_Q4.gguf.part'), 'partial')
+
+  try {
+    assert.deepEqual(installedWeightVariants(models, 'trellis/generate', variants), ['Q5'])
+    assert.deepEqual(installedWeightVariants(models, '../escape', variants), [])
+    const files = await listWeightVariantFiles(models, 'trellis/generate', variants.options[0])
+    assert.deepEqual(
+      files.map((file) => file.slice(nodeRoot.length + 1).replaceAll('\\', '/')).sort(),
+      ['dit/model_Q4.gguf', 'dit/model_Q4.gguf.part'],
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
