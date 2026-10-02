@@ -184,11 +184,11 @@ declare global {
         offLog: () => void
       }
       fs: {
+        getPathForFile:  (file: File) => string
         selectImage:     () => Promise<string | null>
         selectMeshFile:  () => Promise<string | null>
         saveModel:       (defaultName: string) => Promise<string | null>
         readFileBase64:  (filePath: string) => Promise<string>
-        getPathForFile:  (file: File) => string
         selectDirectory: (defaultPath?: string) => Promise<string | null>
         savePath:        (args: { filters: { name: string; extensions: string[] }[]; defaultPath?: string }) => Promise<string | null>
         listDir:         (dirPath: string) => Promise<string[]>

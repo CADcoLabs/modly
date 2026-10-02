@@ -17,9 +17,7 @@ export interface WebFrameLike {
   setZoomFactor(factor: number): void
 }
 
-export interface WebUtilsLike {
-  getPathForFile(file: File): string
-}
+export type WebUtilsLike = Pick<typeof import('electron').webUtils, 'getPathForFile'>
 
 export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFrameLike, webUtils: WebUtilsLike) {
   return {
@@ -77,6 +75,8 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
 
     // File system dialogs + local file reading
     fs: {
+      getPathForFile:    (file: Parameters<WebUtilsLike['getPathForFile']>[0]): string =>
+        webUtils.getPathForFile(file),
       selectImage:       (): Promise<string | null> =>
         ipcRenderer.invoke('fs:selectImage') as Promise<string | null>,
       selectMeshFile:    (): Promise<string | null> =>
@@ -85,8 +85,6 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:saveModel', defaultName) as Promise<string | null>,
       readFileBase64:    (filePath: string): Promise<string> =>
         ipcRenderer.invoke('fs:readFileBase64', filePath) as Promise<string>,
-      // Absolute path of a File from a drag-and-drop (File.path was removed in Electron 32).
-      getPathForFile:    (file: File): string => webUtils.getPathForFile(file),
       selectDirectory:   (defaultPath?: string): Promise<string | null> =>
         ipcRenderer.invoke('fs:selectDirectory', defaultPath) as Promise<string | null>,
       savePath:          (args: { filters: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | null> =>

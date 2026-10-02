@@ -6,6 +6,7 @@ import { showCompletionNotification, showErrorNotification } from '@shared/utils
 import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
+import { assignSlotFilePaths } from './slotInputs'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -344,16 +345,10 @@ async function executeExtensionNode(
       }
     }
 
-    for (let i = 0; i < inputTypes.length; i++) {
-      const fp = inputPaths[i]
-      if (!fp) continue
-      if (inputTypes[i] === 'mesh') {
-        nodeInputMeshPath = fp
-      } else if (inputTypes[i] === 'image') {
-        if (!nodeInputPath) nodeInputPath = fp
-        else extraImagePaths.push(fp)
-      }
-    }
+    const slots = assignSlotFilePaths(inputTypes, inputPaths)
+    nodeInputPath     = slots.nodeInputPath
+    nodeInputMeshPath = slots.nodeInputMeshPath
+    extraImagePaths.push(...slots.extraImagePaths)
   } else {
     for (const edge of incomingEdges) {
       const src = resolveSource(edge.source)
