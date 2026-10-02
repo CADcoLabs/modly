@@ -4,6 +4,7 @@ import inspect
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -155,6 +156,53 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         self.registry.reload()
         self.assertNotIn(str(extension.resolve()), sys.path)
 
+    def test_scene_and_existing_custom_io_types_are_registered(self) -> None:
+        for extension_id, input_kind in (("scene-io", "scene"), ("capture-io", "capture"), ("video-io", "video")):
+            extension = self._make_extension(extension_id)
+            manifest = {
+                "id": extension_id, "name": extension_id, "type": "model",
+                "generator_class": "TestGenerator",
+                "nodes": [{"id": "generate", "input": input_kind, "output": "scene"}],
+            }
+            (extension / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (extension / "generator.py").write_text(
+                "from services.generators.base import BaseGenerator\n"
+                "class TestGenerator(BaseGenerator):\n"
+                " def load(self): self._model = object()\n"
+                " def generate(self, value, params, progress_cb=None, cancel_event=None): return self.outputs_dir\n",
+                encoding="utf-8",
+            )
+
+        self.registry.initialize()
+        self.assertEqual(self.registry.get_manifest("scene-io/generate")["input"], "scene")
+        self.assertEqual(self.registry.get_manifest("capture-io/generate")["input"], "capture")
+        self.assertEqual(self.registry.get_manifest("video-io/generate")["input"], "video")
+
+    def test_scene_input_rejects_multi_input_shapes_but_image_multi_can_output_scene(self) -> None:
+        cases = {
+            "scene-mixed": {"input": "scene", "inputs": ["scene", "text"], "output": "mesh"},
+            "scene-array": {"input": "scene", "inputs": ["scene"], "output": "mesh"},
+            "images-scene": {"input": "image", "inputs": ["image", "image"], "output": "scene"},
+        }
+        for extension_id, node in cases.items():
+            extension = self._make_extension(extension_id)
+            (extension / "manifest.json").write_text(json.dumps({
+                "id": extension_id, "name": extension_id, "type": "model",
+                "generator_class": "TestGenerator",
+                "nodes": [{"id": "generate", **node}],
+            }), encoding="utf-8")
+            (extension / "generator.py").write_text(
+                "from services.generators.base import BaseGenerator\n"
+                "class TestGenerator(BaseGenerator):\n"
+                " def load(self): self._model = object()\n"
+                " def generate(self, value, params, progress_cb=None, cancel_event=None): return self.outputs_dir\n",
+                encoding="utf-8",
+            )
+        self.registry.initialize()
+        self.assertIn("scene-mixed/generate", self.registry.load_errors())
+        self.assertIn("scene-array/generate", self.registry.load_errors())
+        self.assertIn("images-scene/generate", self.registry._generators)
+
     def test_declared_sources_block_generation_even_when_generator_overrides_readiness(self) -> None:
         extension = self._make_extension("multi-source")
         manifest = {
@@ -283,6 +331,37 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         self.assertEqual(adapter.shared_model_dirs, {"base": relocated / "shared-model/_shared/base"})
         self.assertEqual(adapter.MODEL_NODE_ID, "adapter")
         self.assertFalse(self.registry._is_downloaded("shared-model/adapter", adapter))
+
+    def test_activate_ready_generator_switches_before_loading_exact_model(self) -> None:
+        class Generator:
+            DISPLAY_NAME = "test"
+            def __init__(self):
+                self.loaded = False
+                self.unloads = 0
+            def is_downloaded(self): return True
+            def is_loaded(self): return self.loaded
+            def load(self): self.loaded = True
+            def unload(self):
+                self.loaded = False
+                self.unloads += 1
+
+        first = Generator()
+        second = Generator()
+        first.loaded = True
+        self.registry._generators = {"demo/a": first, "demo/b": second}
+        self.registry._manifests = {
+            "demo/a": {"name": "A"},
+            "demo/b": {"name": "B"},
+        }
+        self.registry._active_id = "demo/a"
+
+        selected = self.registry.activate_ready_generator("demo/b")
+
+        self.assertIs(selected, second)
+        self.assertEqual(self.registry._active_id, "demo/b")
+        self.assertFalse(first.loaded)
+        self.assertEqual(first.unloads, 1)
+        self.assertTrue(second.loaded)
 
     def test_reload_preserves_legacy_path_owned_by_the_host(self) -> None:
         extension = self._make_extension("host-owned-path")
@@ -644,6 +723,62 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(self.registry._generators, {})
         self.assertEqual(self.registry.load_errors(), {})
+
+
+class _StatusOnlyGenerator:
+    DISPLAY_NAME = "Fake"
+    VRAM_GB = 1
+
+    def is_downloaded(self) -> bool:
+        return True
+
+    def is_loaded(self) -> bool:
+        return False
+
+    def params_schema(self) -> list:
+        return [{"id": "steps"}]
+
+
+class GeneratorRegistryLockTests(unittest.TestCase):
+    def test_status_reads_do_not_wait_for_an_in_progress_load(self):
+        # A load holds the lifecycle lock for its whole duration (first-run
+        # downloads included); status endpoints must keep answering meanwhile.
+        registry = GeneratorRegistry()
+        registry._generators["demo/generate"] = _StatusOnlyGenerator()
+        registry._manifests["demo/generate"] = {"name": "Demo"}
+        registry._active_id = "demo/generate"
+
+        lock_held = threading.Event()
+        release = threading.Event()
+
+        def hold_lock() -> None:
+            with registry._lifecycle_lock:
+                lock_held.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        self.addCleanup(holder.join)
+        self.addCleanup(release.set)
+        self.assertTrue(lock_held.wait(5))
+
+        results = {}
+
+        def read_status() -> None:
+            results["active"] = registry.active_status()
+            results["all"] = registry.all_status()
+            results["params"] = registry.params_schema("demo/generate")
+            results["model"] = registry.model_status("demo/generate")
+
+        reader = threading.Thread(target=read_status)
+        reader.start()
+        reader.join(2)
+
+        self.assertFalse(reader.is_alive(), "status reads blocked on the lifecycle lock")
+        self.assertEqual(results["active"]["id"], "demo/generate")
+        self.assertEqual([m["id"] for m in results["all"]], ["demo/generate"])
+        self.assertEqual(results["params"], [{"id": "steps"}])
+        self.assertFalse(results["model"]["loaded"])
 
 
 if __name__ == "__main__":

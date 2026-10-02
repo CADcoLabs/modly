@@ -14,10 +14,10 @@ import type {
 export interface ExtensionNode {
   id:               string
   name:             string
-  input:            'image' | 'text' | 'mesh' | 'audio'
-  inputs?:          ('image' | 'text' | 'mesh' | 'audio')[]   // multi-input nodes; overrides input when set
+  input:            'image' | 'text' | 'mesh' | 'audio' | 'scene'
+  inputs?:          ('image' | 'text' | 'mesh' | 'audio' | 'scene')[]   // multi-input nodes; overrides input when set
   inputLabels?:     string[]   // display labels per input slot (e.g. positive/negative)
-  output:           'image' | 'text' | 'mesh' | 'audio'
+  output:           'image' | 'text' | 'mesh' | 'audio' | 'scene'
   paramsSchema:     ParamSchema[]
   paramDefaults?:   Record<string, number | string>
   hfRepo?:          string
@@ -162,6 +162,9 @@ declare global {
       shell: {
         openExternal: (url: string) => Promise<void>
       }
+      slicer: {
+        open: (url: string) => Promise<{ success: boolean; error?: string }>
+      }
       system: {
         memory: () => Promise<{ total: number; used: number; available: number }>
       }
@@ -188,6 +191,7 @@ declare global {
         offLog: () => void
       }
       fs: {
+        getPathForFile:  (file: File) => string
         selectImage:     () => Promise<string | null>
         selectMeshFile:  () => Promise<string | null>
         saveModel:       (defaultName: string) => Promise<string | null>

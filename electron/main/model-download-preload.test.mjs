@@ -29,7 +29,11 @@ test('renderer model actions keep node and shared-weight identities explicit', a
     on: () => {},
     removeAllListeners: () => {},
   }
-  const api = createElectronApi(ipc, { setZoomFactor: () => {} })
+  const api = createElectronApi(
+    ipc,
+    { setZoomFactor: () => {} },
+    { getPathForFile: () => '' },
+  )
 
   await api.model.isDownloaded('pixal3d/generate')
   await api.model.hasLocalData('pixal3d/generate')

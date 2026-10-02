@@ -63,6 +63,7 @@ import {
   validateExtensionReloadPayload,
   validateExistingExtensionReplacement,
   validateInstallManifest,
+  assertSupportedSceneNodeShape,
 } from './extension-install-utils'
 import {
   beginExtensionRegistrationTransaction,
@@ -82,6 +83,7 @@ import {
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
 import { updatesSupported } from './updater'
 import { ModelWeightOperations } from './model-weight-operations'
+import { readLocalFileBase64 } from './bounded-file-reader'
 
 type WindowGetter = () => BrowserWindow | null
 const pExecFile = promisify(execFile)
@@ -404,13 +406,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // Read local file → base64 (bypasses file:// restrictions in the renderer)
-  ipcMain.handle('fs:readFileBase64', async (_, filePath: string) => {
-    if (typeof filePath !== 'string' || filePath.trim().length === 0) {
-      throw new Error('fs:readFileBase64 requires a non-empty file path')
-    }
-    const buffer = await readFile(filePath)
-    return buffer.toString('base64')
-  })
+  ipcMain.handle('fs:readFileBase64', (_, filePath: string) => readLocalFileBase64(filePath))
 
   ipcMain.handle('fs:readScreenshotDataUrl', async (_, filename: string) => {
     const filePath = app.isPackaged
@@ -753,6 +749,26 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Shell
   ipcMain.handle('shell:openExternal', (_, url: string) => shell.openExternal(url))
 
+  // Open a model in OrcaSlicer via its orcaslicer://open?file=<url> deeplink.
+  //
+  // The returned error only covers the shell refusing the call outright. It is
+  // NOT an install check: on Windows an unregistered scheme still makes
+  // ShellExecuteEx succeed — the OS shows its own "You'll need a new app to open
+  // this orcaslicer link" dialog and this resolves with success. Detecting a
+  // missing OrcaSlicer would take a per-platform handler probe (registry on
+  // Windows), so the renderer must not promise the user that it knows.
+  ipcMain.handle('slicer:open', async (_, url: string): Promise<{ success: boolean; error?: string }> => {
+    if (typeof url !== 'string' || !url.startsWith('orcaslicer://')) {
+      return { success: false, error: 'slicer:open requires an orcaslicer:// URL' }
+    }
+    try {
+      await shell.openExternal(url)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
   // App info
   // System memory (used/available/total bytes).
   // On macOS, matches Activity Monitor's "Memory Used":
@@ -1027,10 +1043,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     nodes?: {
       id:                string
       name?:             string
-      input?:            'mesh' | 'image' | 'text' | 'audio'
-      inputs?:           ('mesh' | 'image' | 'text' | 'audio')[]
+      input?:            string
+      inputs?:           string[]
       input_labels?:     string[]
-      output?:           'mesh' | 'image' | 'text' | 'audio'
+      output?:           string
       params_schema?:    unknown[]
       param_defaults?:   Record<string, unknown>
       hf_repo?:          string
@@ -1065,6 +1081,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       validateModelNodeIds(parsed.nodes ?? [])
     }
     const nodes = (parsed.nodes ?? []).map(n => {
+      const declaredInputs = Array.isArray(n.inputs) ? n.inputs : [n.input ?? 'image']
+      const output = n.output ?? 'mesh'
+      assertSupportedSceneNodeShape(parsed.type === 'process' ? 'process' : 'model', n, declaredInputs, output)
       const usesManagedWeights = weightGroups !== undefined
         || n.model_sources !== undefined
         || n.weight_groups !== undefined

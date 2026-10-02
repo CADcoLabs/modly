@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -262,6 +263,50 @@ class MultiSourceRouterTests(unittest.TestCase):
         paths = {route.path for route in model_router.router.routes}
         self.assertIn("/unload/{model_id:path}", paths)
         self.assertEqual(model_router.Request.__module__, "urllib.request")
+
+
+class ModelLifecycleEndpointTests(unittest.TestCase):
+    def test_status_and_switch_do_not_block_the_event_loop_while_lifecycle_is_contended(self) -> None:
+        class ContendedRegistry:
+            def __init__(self):
+                self.lock = threading.Lock()
+            def active_status(self):
+                with self.lock:
+                    return {"id": "demo/a", "loaded": True}
+            def switch_model(self, model_id):
+                with self.lock:
+                    return None
+
+        registry = ContendedRegistry()
+        previous = model_router.generator_registry
+        model_router.generator_registry = registry
+
+        async def assert_responsive(call):
+            registry.lock.acquire()
+            release = threading.Timer(0.25, registry.lock.release)
+            release.start()
+            try:
+                start = asyncio.get_running_loop().time()
+                task = asyncio.create_task(call())
+                await asyncio.sleep(0.02)
+                elapsed = asyncio.get_running_loop().time() - start
+                self.assertLess(elapsed, 0.15)
+                return await task
+            finally:
+                release.join()
+
+        async def run():
+            status = await assert_responsive(model_router.model_status)
+            switched = await assert_responsive(lambda: model_router.switch_model("demo/b"))
+            return status, switched
+
+        try:
+            status, switched = asyncio.run(run())
+        finally:
+            model_router.generator_registry = previous
+
+        self.assertEqual(status["id"], "demo/a")
+        self.assertEqual(switched, {"active": "demo/b"})
 
 
 if __name__ == "__main__":

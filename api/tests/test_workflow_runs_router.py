@@ -24,6 +24,9 @@ class _FakeRegistry:
     def get_generator(self, model_id: str) -> object:
         return object()
 
+    def get_manifest(self, model_id: str) -> dict:
+        return {"output": "mesh"}
+
     def switch_model(self, model_id: str) -> None:
         pass
 
@@ -79,7 +82,7 @@ class CreateRunCollectionTests(unittest.TestCase):
                 params="{}",
             )
         )
-        # add_task(_run_generation, job_id, image_bytes, full_params, collection)
+        # add_task(_run_generation, ..., collection, output_kind, model_id)
         return background.tasks[0].args[3]
 
     def test_collection_is_forwarded_to_the_run(self) -> None:
