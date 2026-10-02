@@ -5,7 +5,7 @@ import { buildAllWorkflowExtensions } from '../mockExtensions'
 import type { ParamSchema } from '../mockExtensions'
 import type { WFNodeData } from '@shared/types/electron.d'
 import { PICKER_LABELS, openParamPicker, resolvePickerIntent } from '@shared/utils/paramPicker'
-import { PickerIcon } from '@shared/components/ui'
+import { FloatInput, IntInput, PickerIcon } from '@shared/components/ui'
 import { useWorkflowRunStore } from '../workflowRunStore'
 import BaseNode from './BaseNode'
 
@@ -31,93 +31,6 @@ const TAG_CLS: Record<string, string> = {
 // these fields, so click-drag text selection (or opening a <select>) moves the
 // node instead.
 const inputCls = 'nodrag w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-accent/60'
-
-function IntInput({ value, onChange, className }: { value: number; onChange: (v: number) => void; className: string }) {
-  const [text, setText] = useState(String(value))
-  const prevValue = useRef(value)
-  if (prevValue.current !== value && parseInt(text, 10) !== value) {
-    prevValue.current = value
-    setText(String(value))
-  }
-  return (
-    <input
-      type="text"
-      inputMode="numeric"
-      value={text}
-      onChange={(e) => {
-        const raw = e.target.value
-        if (raw !== '' && raw !== '-' && !/^-?\d+$/.test(raw)) return
-        setText(raw)
-        const n = parseInt(raw, 10)
-        if (!isNaN(n)) { prevValue.current = n; onChange(n) }
-      }}
-      className={className}
-    />
-  )
-}
-
-function FloatInput({ value, onChange, className, min, max, step, label, defaultValue }: {
-  value: number
-  onChange: (v: number) => void
-  className: string
-  min?: number
-  max?: number
-  step?: number
-  label: string
-  defaultValue: number
-}) {
-  const [text, setText] = useState(String(value))
-  // Sync when external value changes (e.g. reset)
-  const prevValue = useRef(value)
-  if (prevValue.current !== value && parseFloat(text.replace(',', '.')) !== value) {
-    prevValue.current = value
-    setText(String(value))
-  }
-  const sliderMin = typeof min === 'number' ? min : 0
-  const sliderMax = typeof max === 'number' ? max : 0
-  const hasSlider = typeof min === 'number' && typeof max === 'number' && sliderMax > sliderMin
-  const sliderStep = typeof step === 'number' && step > 0
-    ? step
-    : hasSlider ? (sliderMax - sliderMin) / 100 : undefined
-  const parsedValue = typeof value === 'number' ? value : Number.parseFloat(String(value))
-  const sliderValue = Number.isFinite(parsedValue) ? parsedValue : defaultValue
-  const numberInput = (
-    <input
-      type="text"
-      inputMode="decimal"
-      value={text}
-      onChange={(e) => {
-        const raw = e.target.value.replace(',', '.')
-        if (raw !== '' && raw !== '-' && raw !== '.' && !/^-?\d*\.?\d*$/.test(raw)) return
-        setText(e.target.value)
-        const num = parseFloat(raw)
-        if (!isNaN(num)) { prevValue.current = num; onChange(num) }
-      }}
-      className={hasSlider ? `${className.replace('w-full', 'w-16 shrink-0 text-center')} nodrag` : className}
-    />
-  )
-  if (!hasSlider) return numberInput
-
-  return (
-    <div className="flex items-center gap-1.5 w-full">
-      <input
-        type="range"
-        min={sliderMin}
-        max={sliderMax}
-        step={sliderStep}
-        value={Math.min(sliderMax, Math.max(sliderMin, sliderValue))}
-        onChange={(e) => {
-          const num = e.currentTarget.valueAsNumber
-          if (Number.isFinite(num)) { setText(String(num)); prevValue.current = num; onChange(num) }
-        }}
-        aria-label={`${label} slider`}
-        style={{ accentColor: '#38bdf8', cursor: 'pointer' }}
-        className="nodrag min-w-0 flex-1"
-      />
-      {numberInput}
-    </div>
-  )
-}
 
 /** Dropdown of the files inside the folder held by another param (dir_from). */
 function FileSelectControl({ param, value, dirValue, onChange }: {
@@ -190,8 +103,7 @@ function ParamControl({ param, value, onChange, resolvedParams }: {
   }
   if (param.type === 'float') {
     return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls}
-      min={param.min} max={param.max} step={param.step} label={param.label}
-      defaultValue={typeof param.default === 'number' ? param.default : 0} />
+      min={param.min} max={param.max} step={param.step} label={param.label} />
   }
   // int
   return <IntInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />

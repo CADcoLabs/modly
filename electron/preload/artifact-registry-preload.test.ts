@@ -13,7 +13,7 @@ test('preload exposes scoped workspace library list/read/open methods', async ()
     send: () => undefined,
     on: () => undefined,
     removeAllListeners: () => undefined,
-  }, { setZoomFactor: () => undefined })
+  }, { setZoomFactor: () => undefined }, { getPathForFile: () => '' })
 
   await api.workspace.library.list()
   await api.workspace.library.read({

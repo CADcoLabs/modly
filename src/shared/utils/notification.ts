@@ -7,7 +7,7 @@
  * Skipped when the app window already has focus: the user is looking right at
  * it, so a toast on top would just be noise.
  */
-export async function showCompletionNotification(body: string, title = 'Modly'): Promise<void> {
+async function notifyIfUnfocused(title: string, body: string): Promise<void> {
   if (typeof document !== 'undefined' && document.hasFocus()) return
   try {
     await window.electron.notifications.show(title, body)
@@ -16,10 +16,10 @@ export async function showCompletionNotification(body: string, title = 'Modly'):
   }
 }
 
-export async function showErrorNotification(body: string, title = 'Modly'): Promise<void> {
-  try {
-    await window.electron.notifications.show(title, body)
-  } catch {
-    // Notifications not available (e.g. unsupported platform)
-  }
+export function showCompletionNotification(body: string, title = 'Modly'): Promise<void> {
+  return notifyIfUnfocused(title, body)
+}
+
+export function showErrorNotification(body: string, title = 'Modly'): Promise<void> {
+  return notifyIfUnfocused(title, body)
 }

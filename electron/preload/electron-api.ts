@@ -17,7 +17,11 @@ export interface WebFrameLike {
   setZoomFactor(factor: number): void
 }
 
-export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFrameLike) {
+export interface WebUtilsLike {
+  getPathForFile(file: File): string
+}
+
+export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFrameLike, webUtils: WebUtilsLike) {
   return {
     // Window controls
     window: {
@@ -75,6 +79,8 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:saveModel', defaultName) as Promise<string | null>,
       readFileBase64:    (filePath: string): Promise<string> =>
         ipcRenderer.invoke('fs:readFileBase64', filePath) as Promise<string>,
+      // Absolute path of a File from a drag-and-drop (File.path was removed in Electron 32).
+      getPathForFile:    (file: File): string => webUtils.getPathForFile(file),
       selectDirectory:   (defaultPath?: string): Promise<string | null> =>
         ipcRenderer.invoke('fs:selectDirectory', defaultPath) as Promise<string | null>,
       savePath:          (args: { filters: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | null> =>
