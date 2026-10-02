@@ -114,6 +114,31 @@ class MeshRoutersAfterWorkspaceMoveTests(unittest.TestCase):
                 call()
             self.assertEqual(raised.exception.status_code, 400)
 
+    def test_a_sibling_folder_sharing_the_workspace_prefix_is_refused(self) -> None:
+        # "<workspace>-secret" starts with the workspace's path string, so a string
+        # prefix check let it through; the containment check must compare ancestry.
+        sibling = self.root / "new_workspace-secret"
+        sibling.mkdir()
+        trimesh.creation.box().export(sibling / "private.glb")
+        escaping = "../new_workspace-secret/private.glb"
+        calls = {
+            "/export/{fmt}": lambda: export_router.export_mesh("stl", escaping),
+            "/optimize/export": lambda: optimize_router.export_mesh(path=escaping, format="obj"),
+            "/optimize/mesh, /smooth, /transform": lambda: optimize_router._resolve_input_path(escaping),
+            "/optimize/ply-to-splat": lambda: optimize_router.ply_to_splat(escaping),
+        }
+        for route, call in calls.items():
+            with self.subTest(route=route), self.assertRaises(HTTPException) as raised:
+                call()
+            self.assertEqual(raised.exception.status_code, 400)
+
+    def test_is_within_workspace_compares_ancestry(self) -> None:
+        workspace = registry.WORKSPACE_DIR.resolve()
+        self.assertTrue(registry.is_within_workspace(workspace))
+        self.assertTrue(registry.is_within_workspace(workspace / "MyColl" / "mesh.glb"))
+        self.assertFalse(registry.is_within_workspace(workspace.parent / "new_workspace-secret" / "x.glb"))
+        self.assertFalse(registry.is_within_workspace(workspace.parent))
+
 
 if __name__ == "__main__":
     unittest.main()

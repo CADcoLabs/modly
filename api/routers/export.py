@@ -184,7 +184,7 @@ def export_mesh(fmt: str, path: str):
         raise HTTPException(400, f"Unsupported format: {fmt}. Supported: {', '.join(SUPPORTED)}")
 
     full_path = (registry.WORKSPACE_DIR / path).resolve()
-    if not str(full_path).startswith(str(registry.WORKSPACE_DIR.resolve())):
+    if not registry.is_within_workspace(full_path):
         raise HTTPException(400, "Invalid path")
     if not full_path.exists():
         raise HTTPException(404, f"File not found: {path}")

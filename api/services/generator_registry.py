@@ -55,6 +55,17 @@ print(f"[Registry] WORKSPACE_DIR  = {WORKSPACE_DIR}")
 print(f"[Registry] EXTENSIONS_DIR = {EXTENSIONS_DIR or '(not set)'}")
 
 
+def is_within_workspace(resolved_path: Path) -> bool:
+    """True when an already-resolved path is the current workspace or inside it.
+
+    Compares ancestry, not string prefixes: ``startswith`` would also accept a
+    sibling folder such as ``<workspace>-other``. Reads WORKSPACE_DIR at call
+    time, since moving the workspace rebinds it.
+    """
+    workspace = WORKSPACE_DIR.resolve()
+    return resolved_path == workspace or workspace in resolved_path.parents
+
+
 # ------------------------------------------------------------------ #
 # Extension loader
 # ------------------------------------------------------------------ #
