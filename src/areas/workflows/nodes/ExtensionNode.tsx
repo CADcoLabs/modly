@@ -56,7 +56,16 @@ function IntInput({ value, onChange, className }: { value: number; onChange: (v:
   )
 }
 
-function FloatInput({ value, onChange, className }: { value: number; onChange: (v: number) => void; className: string }) {
+function FloatInput({ value, onChange, className, min, max, step, label, defaultValue }: {
+  value: number
+  onChange: (v: number) => void
+  className: string
+  min?: number
+  max?: number
+  step?: number
+  label: string
+  defaultValue: number
+}) {
   const [text, setText] = useState(String(value))
   // Sync when external value changes (e.g. reset)
   const prevValue = useRef(value)
@@ -64,7 +73,15 @@ function FloatInput({ value, onChange, className }: { value: number; onChange: (
     prevValue.current = value
     setText(String(value))
   }
-  return (
+  const sliderMin = typeof min === 'number' ? min : 0
+  const sliderMax = typeof max === 'number' ? max : 0
+  const hasSlider = typeof min === 'number' && typeof max === 'number' && sliderMax > sliderMin
+  const sliderStep = typeof step === 'number' && step > 0
+    ? step
+    : hasSlider ? (sliderMax - sliderMin) / 100 : undefined
+  const parsedValue = typeof value === 'number' ? value : Number.parseFloat(String(value))
+  const sliderValue = Number.isFinite(parsedValue) ? parsedValue : defaultValue
+  const numberInput = (
     <input
       type="text"
       inputMode="decimal"
@@ -76,8 +93,29 @@ function FloatInput({ value, onChange, className }: { value: number; onChange: (
         const num = parseFloat(raw)
         if (!isNaN(num)) { prevValue.current = num; onChange(num) }
       }}
-      className={className}
+      className={hasSlider ? `${className.replace('w-full', 'w-16 shrink-0 text-center')} nodrag` : className}
     />
+  )
+  if (!hasSlider) return numberInput
+
+  return (
+    <div className="flex items-center gap-1.5 w-full">
+      <input
+        type="range"
+        min={sliderMin}
+        max={sliderMax}
+        step={sliderStep}
+        value={Math.min(sliderMax, Math.max(sliderMin, sliderValue))}
+        onChange={(e) => {
+          const num = e.currentTarget.valueAsNumber
+          if (Number.isFinite(num)) { setText(String(num)); prevValue.current = num; onChange(num) }
+        }}
+        aria-label={`${label} slider`}
+        style={{ accentColor: '#38bdf8', cursor: 'pointer' }}
+        className="nodrag min-w-0 flex-1"
+      />
+      {numberInput}
+    </div>
   )
 }
 
@@ -151,7 +189,9 @@ function ParamControl({ param, value, onChange, resolvedParams }: {
     )
   }
   if (param.type === 'float') {
-    return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
+    return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls}
+      min={param.min} max={param.max} step={param.step} label={param.label}
+      defaultValue={typeof param.default === 'number' ? param.default : 0} />
   }
   // int
   return <IntInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
