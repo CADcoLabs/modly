@@ -13,6 +13,7 @@ import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { useWaitButton } from '@areas/workflows/useWaitButton'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
 import { validateWorkflowPreflight } from '@areas/workflows/preflight'
+import { mimeFromPath } from '@areas/workflows/nodes/imageUtils'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
 import { PICKER_LABELS, openParamPicker, resolvePickerIntent } from '@shared/utils/paramPicker'
@@ -28,6 +29,8 @@ const TYPE_COLOR: Record<string, string> = {
   mesh:  '#a78bfa',
   text:  '#fbbf24',
 }
+
+const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -52,13 +55,6 @@ function topoSortNodes(nodes: Workflow['nodes'], edges: Workflow['edges']): WFNo
     }
   }
   return result
-}
-
-function mimeFromPath(p: string): string {
-  const ext = p.split('.').pop()?.toLowerCase() ?? ''
-  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
-  if (ext === 'webp') return 'image/webp'
-  return 'image/png'
 }
 
 // ─── Param field ──────────────────────────────────────────────────────────────
@@ -89,14 +85,31 @@ function IntInput({ value, onChange, className }: { value: number; onChange: (v:
   )
 }
 
-function FloatInput({ value, onChange, className }: { value: number; onChange: (v: number) => void; className: string }) {
+function FloatInput({ value, onChange, className, min, max, step, label, defaultValue }: {
+  value: number
+  onChange: (v: number) => void
+  className: string
+  min?: number
+  max?: number
+  step?: number
+  label: string
+  defaultValue: number
+}) {
   const [text, setText] = useState(String(value))
   const prevValue = useRef(value)
   if (prevValue.current !== value && parseFloat(text.replace(',', '.')) !== value) {
     prevValue.current = value
     setText(String(value))
   }
-  return (
+  const sliderMin = typeof min === 'number' ? min : 0
+  const sliderMax = typeof max === 'number' ? max : 0
+  const hasSlider = typeof min === 'number' && typeof max === 'number' && sliderMax > sliderMin
+  const sliderStep = typeof step === 'number' && step > 0
+    ? step
+    : hasSlider ? (sliderMax - sliderMin) / 100 : undefined
+  const parsedValue = typeof value === 'number' ? value : Number.parseFloat(String(value))
+  const sliderValue = Number.isFinite(parsedValue) ? parsedValue : defaultValue
+  const numberInput = (
     <input
       type="text"
       inputMode="decimal"
@@ -108,8 +121,29 @@ function FloatInput({ value, onChange, className }: { value: number; onChange: (
         const num = parseFloat(raw)
         if (!isNaN(num)) { prevValue.current = num; onChange(num) }
       }}
-      className={className}
+      className={hasSlider ? `${className.replace('w-full', 'w-16 shrink-0 text-center')} nodrag` : className}
     />
+  )
+  if (!hasSlider) return numberInput
+
+  return (
+    <div className="flex items-center gap-1.5 w-full">
+      <input
+        type="range"
+        min={sliderMin}
+        max={sliderMax}
+        step={sliderStep}
+        value={Math.min(sliderMax, Math.max(sliderMin, sliderValue))}
+        onChange={(e) => {
+          const num = e.currentTarget.valueAsNumber
+          if (Number.isFinite(num)) { setText(String(num)); prevValue.current = num; onChange(num) }
+        }}
+        aria-label={`${label} slider`}
+        style={{ accentColor: '#38bdf8', cursor: 'pointer' }}
+        className="nodrag min-w-0 flex-1"
+      />
+      {numberInput}
+    </div>
   )
 }
 
@@ -144,7 +178,9 @@ function ParamField({ param, value, onChange }: {
     )
   }
   if (param.type === 'float') {
-    return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
+    return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls}
+      min={param.min} max={param.max} step={param.step} label={param.label}
+      defaultValue={typeof param.default === 'number' ? param.default : 0} />
   }
   // int
   return <IntInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
@@ -212,17 +248,40 @@ function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: Flow
   const node     = nodes.find((n) => n.id === nodeId)
   const data     = node?.data as { params: Record<string, unknown> } | undefined
   const preview  = data?.params.preview as string | undefined
+  const showToast = useAppStore((state) => state.showToast)
+  const loadRequest = useRef(0)
+
+  const applyImagePath = useCallback(async (path: string | null) => {
+    const request = ++loadRequest.current
+    if (!path) return
+    try {
+      const base64 = await window.electron.fs.readFileBase64(path)
+      if (request !== loadRequest.current) return
+      const src = `data:${mimeFromPath(path)};base64,${base64}`
+      onPatch(nodeId, { params: { ...(data?.params ?? {}), filePath: path, preview: src } })
+    } catch {
+      if (request === loadRequest.current) showToast('Unable to load the selected image')
+    }
+  }, [nodeId, data?.params, onPatch, showToast])
 
   const browse = useCallback(async () => {
-    const p = await window.electron.fs.selectImage()
-    if (!p) return
-    const base64 = await window.electron.fs.readFileBase64(p)
-    const src = `data:${mimeFromPath(p)};base64,${base64}`
-    onPatch(nodeId, { params: { ...(data?.params ?? {}), filePath: p, preview: src } })
-  }, [nodeId, data?.params, onPatch])
+    await applyImagePath(await window.electron.fs.selectImage())
+  }, [applyImagePath])
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div
+      className="flex flex-col gap-1.5"
+      onDragOver={(event) => {
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+      }}
+      onDrop={(event) => {
+        event.preventDefault()
+        const file = event.dataTransfer.files[0]
+        if (!file || !SUPPORTED_IMAGE_TYPES.has(file.type)) return
+        void applyImagePath(window.electron.fs.getPathForFile(file))
+      }}
+    >
       <div className="flex items-center gap-1.5">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" strokeWidth="2">
           <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
