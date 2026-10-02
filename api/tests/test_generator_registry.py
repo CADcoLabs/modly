@@ -4,6 +4,7 @@ import inspect
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -649,6 +650,62 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(self.registry._generators, {})
         self.assertEqual(self.registry.load_errors(), {})
+
+
+class _StatusOnlyGenerator:
+    DISPLAY_NAME = "Fake"
+    VRAM_GB = 1
+
+    def is_downloaded(self) -> bool:
+        return True
+
+    def is_loaded(self) -> bool:
+        return False
+
+    def params_schema(self) -> list:
+        return [{"id": "steps"}]
+
+
+class GeneratorRegistryLockTests(unittest.TestCase):
+    def test_status_reads_do_not_wait_for_an_in_progress_load(self):
+        # A load holds the lifecycle lock for its whole duration (first-run
+        # downloads included); status endpoints must keep answering meanwhile.
+        registry = GeneratorRegistry()
+        registry._generators["demo/generate"] = _StatusOnlyGenerator()
+        registry._manifests["demo/generate"] = {"name": "Demo"}
+        registry._active_id = "demo/generate"
+
+        lock_held = threading.Event()
+        release = threading.Event()
+
+        def hold_lock() -> None:
+            with registry._lifecycle_lock:
+                lock_held.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        self.addCleanup(holder.join)
+        self.addCleanup(release.set)
+        self.assertTrue(lock_held.wait(5))
+
+        results = {}
+
+        def read_status() -> None:
+            results["active"] = registry.active_status()
+            results["all"] = registry.all_status()
+            results["params"] = registry.params_schema("demo/generate")
+            results["model"] = registry.model_status("demo/generate")
+
+        reader = threading.Thread(target=read_status)
+        reader.start()
+        reader.join(2)
+
+        self.assertFalse(reader.is_alive(), "status reads blocked on the lifecycle lock")
+        self.assertEqual(results["active"]["id"], "demo/generate")
+        self.assertEqual([m["id"] for m in results["all"]], ["demo/generate"])
+        self.assertEqual(results["params"], [{"id": "steps"}])
+        self.assertFalse(results["model"]["loaded"])
 
 
 if __name__ == "__main__":

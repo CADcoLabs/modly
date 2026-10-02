@@ -235,8 +235,9 @@ def main() -> None:
                 if hasattr(model_input, "kind"):
                     if not isinstance(params, dict):
                         raise ValueError("Model params must be an object")
-                    reserved = {"artifact_path", "input_kind", "input_path", "scene_path", "scene_manifest_path"}
-                    params = {key: value for key, value in params.items() if key not in reserved}
+                    from services.artifact_input import RESERVED_ARTIFACT_PARAMS
+                    params = {key: value for key, value in params.items()
+                              if key not in RESERVED_ARTIFACT_PARAMS}
                     params["scene_manifest_path"] = str(model_input.path)
                 if msg.get("outputs_dir"):
                     gen.outputs_dir = Path(msg["outputs_dir"])

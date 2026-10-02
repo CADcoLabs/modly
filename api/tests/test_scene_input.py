@@ -1,4 +1,5 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,6 +45,27 @@ class SceneInputTests(unittest.TestCase):
             self.skipTest(f"directory symlinks are unavailable on this host: {exc}")
         with self.assertRaises(ValueError):
             validate_scene_input(self.workspace, "Workflows/link")
+
+    @unittest.skipUnless(sys.platform == "win32", "directory junctions are Windows-only")
+    def test_rejects_junction_escape_on_windows(self):
+        # Junctions need no privilege (unlike symlinks), so they are the
+        # realistic escape on Windows and keep the reparse-point check covered.
+        import _winapi
+
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (outside / "scene-manifest.json").write_text(self.manifest.read_text())
+        (outside / "model.glb").write_bytes(b"mesh")
+        _winapi.CreateJunction(str(outside), str(self.workspace / "Workflows" / "link"))
+
+        with self.assertRaises(ValueError):
+            validate_scene_input(self.workspace, "Workflows/link")
+
+        data = json.loads(self.manifest.read_text())
+        data["assets"] = [{"workspacePath": "Workflows/link/model.glb"}]
+        self.manifest.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):
+            validate_scene_input(self.workspace, "Workflows/room")
 
     def test_rejects_missing_assets_and_oversized_manifest(self):
         data = json.loads(self.manifest.read_text())

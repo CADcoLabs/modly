@@ -600,6 +600,10 @@ class GeneratorRegistry:
         self._generators: Dict[str, BaseGenerator] = {}
         self._manifests:  Dict[str, dict]          = {}
         self._errors:     Dict[str, str]           = {}
+        # Serializes everything that changes which generators exist or are
+        # loaded (switch/load, unload, reload, path changes). Read-only status
+        # calls deliberately skip it: a load can hold it for minutes (first-run
+        # downloads happen inside load()), and status must stay responsive.
         self._lifecycle_lock = threading.RLock()
         self._legacy_imports = _LegacyImportManager()
         self._active_id:  str = os.environ.get("SELECTED_MODEL_ID", "sf3d")
@@ -679,25 +683,26 @@ class GeneratorRegistry:
         registration_authorization = _consume_registration_validation_capability(
             validation_capability,
         )
-        print("[Registry] Reloading extensions...")
-        for gen in self._generators.values():
-            if isinstance(gen, ExtensionProcess):
-                gen.stop()
-                if gen._proc is not None:
-                    raise RuntimeError(
-                        "Extension subprocess remained attached after stop()"
-                    )
-            else:
-                try:
-                    gen.unload()
-                except Exception:
-                    pass
-        self._generators.clear()
-        self._manifests.clear()
-        self._errors.clear()
-        self._remove_legacy_paths()
-        self.initialize(registration_authorization)
-        print("[Registry] Reload complete.")
+        with self._lifecycle_lock:
+            print("[Registry] Reloading extensions...")
+            for gen in self._generators.values():
+                if isinstance(gen, ExtensionProcess):
+                    gen.stop()
+                    if gen._proc is not None:
+                        raise RuntimeError(
+                            "Extension subprocess remained attached after stop()"
+                        )
+                else:
+                    try:
+                        gen.unload()
+                    except Exception:
+                        pass
+            self._generators.clear()
+            self._manifests.clear()
+            self._errors.clear()
+            self._remove_legacy_paths()
+            self.initialize(registration_authorization)
+            print("[Registry] Reload complete.")
 
     def load_errors(self) -> Dict[str, str]:
         """Returns extension loading errors."""
@@ -754,15 +759,14 @@ class GeneratorRegistry:
             return self.get_ready_generator(model_id)
 
     def model_status(self, model_id: str) -> dict:
-        with self._lifecycle_lock:
-            gen = self.get_generator(model_id)
-            manifest = self._manifests[model_id]
-            return {
-                "id": model_id,
-                "name": manifest.get("name", gen.DISPLAY_NAME),
-                "downloaded": self._is_downloaded(model_id, gen),
-                "loaded": gen.is_loaded(),
-            }
+        gen = self.get_generator(model_id)
+        manifest = self._manifests[model_id]
+        return {
+            "id": model_id,
+            "name": manifest.get("name", gen.DISPLAY_NAME),
+            "downloaded": self._is_downloaded(model_id, gen),
+            "loaded": gen.is_loaded(),
+        }
 
     def get_generator(self, model_id: str) -> BaseGenerator:
         self._assert_not_quarantined(model_id)
@@ -806,34 +810,36 @@ class GeneratorRegistry:
         return gen.is_downloaded()
 
     def active_status(self) -> dict:
-        with self._lifecycle_lock:
-            return self.model_status(self._active_id)
+        return self.model_status(self._active_id)
 
     def all_status(self) -> list:
-        with self._lifecycle_lock:
-            result = []
-            for model_id, gen in self._generators.items():
-                manifest = self._manifests[model_id]
-                result.append({
-                    "id":          model_id,
-                    "name":        manifest.get("name", gen.DISPLAY_NAME),
-                    "description": manifest.get("description", ""),
-                    "version":     manifest.get("version", ""),
-                    "vram_gb":     manifest.get("vram_gb", gen.VRAM_GB),
-                    "hf_repo":     manifest.get("hf_repo", ""),
-                    "tags":        manifest.get("tags", []),
-                    "downloaded":  self._is_downloaded(model_id, gen),
-                    "loaded":      gen.is_loaded(),
-                    "active":      model_id == self._active_id,
-                })
-            return result
+        result = []
+        active_id = self._active_id
+        # Snapshot: a concurrent reload() may clear the dicts mid-iteration.
+        for model_id, gen in list(self._generators.items()):
+            manifest = self._manifests.get(model_id)
+            if manifest is None:
+                continue
+            result.append({
+                "id":          model_id,
+                "name":        manifest.get("name", gen.DISPLAY_NAME),
+                "description": manifest.get("description", ""),
+                "version":     manifest.get("version", ""),
+                "vram_gb":     manifest.get("vram_gb", gen.VRAM_GB),
+                "hf_repo":     manifest.get("hf_repo", ""),
+                "tags":        manifest.get("tags", []),
+                "downloaded":  self._is_downloaded(model_id, gen),
+                "loaded":      gen.is_loaded(),
+                "active":      model_id == active_id,
+            })
+        return result
 
     def params_schema(self, model_id: Optional[str] = None) -> list:
-        with self._lifecycle_lock:
-            target_id = model_id or self._active_id
-            if target_id not in self._generators:
-                raise KeyError(target_id)
-            return self._generators[target_id].params_schema()
+        target_id = model_id or self._active_id
+        gen = self._generators.get(target_id)
+        if gen is None:
+            raise KeyError(target_id)
+        return gen.params_schema()
 
     # ------------------------------------------------------------------ #
     # Paths update & shutdown
@@ -843,25 +849,27 @@ class GeneratorRegistry:
         global MODELS_DIR, WORKSPACE_DIR
         import services.generator_registry as _self_module
 
-        if models_dir is not None:
-            self.unload_all()
-            models_dir.mkdir(parents=True, exist_ok=True)
-            _self_module.MODELS_DIR = models_dir
-            for model_id, gen in self._generators.items():
-                gen.model_dir = models_dir / model_id
+        with self._lifecycle_lock:
+            if models_dir is not None:
+                self.unload_all()
+                models_dir.mkdir(parents=True, exist_ok=True)
+                _self_module.MODELS_DIR = models_dir
+                for model_id, gen in self._generators.items():
+                    gen.model_dir = models_dir / model_id
 
-        if workspace_dir is not None:
-            workspace_dir.mkdir(parents=True, exist_ok=True)
-            _self_module.WORKSPACE_DIR = workspace_dir
-            for gen in self._generators.values():
-                gen.outputs_dir = workspace_dir
+            if workspace_dir is not None:
+                workspace_dir.mkdir(parents=True, exist_ok=True)
+                _self_module.WORKSPACE_DIR = workspace_dir
+                for gen in self._generators.values():
+                    gen.outputs_dir = workspace_dir
 
     def unload_all(self) -> None:
-        for gen in self._generators.values():
-            if isinstance(gen, ExtensionProcess):
-                gen.stop()
-            else:
-                gen.unload()
+        with self._lifecycle_lock:
+            for gen in self._generators.values():
+                if isinstance(gen, ExtensionProcess):
+                    gen.stop()
+                else:
+                    gen.unload()
 
 
 # Singleton

@@ -90,7 +90,8 @@ async def switch_model(model_id: str):
 @router.post("/unload-all")
 async def unload_all_models():
     """Unloads all models from memory to free VRAM/RAM."""
-    generator_registry.unload_all()
+    # Off the event loop: unloading waits for any in-progress model load.
+    await asyncio.to_thread(generator_registry.unload_all)
     # Force Python to release memory back to the OS
     import gc
     gc.collect()

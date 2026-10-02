@@ -6,6 +6,11 @@ from services.scene_input import validate_scene_input
 
 SUPPORTED_ARTIFACT_INPUTS = frozenset({"scene"})
 
+# Transport parameters set by the host; callers must not be able to forge them.
+RESERVED_ARTIFACT_PARAMS = frozenset({
+    "artifact_path", "input_kind", "input_path", "scene_path", "scene_manifest_path",
+})
+
 
 @dataclass(frozen=True)
 class TypedArtifactInput:

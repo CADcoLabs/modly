@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import axios, { AxiosInstance } from 'axios'
 import { useAppStore } from '@shared/stores/appStore'
 import { getWorkflowExtension } from './mockExtensions'
+import { hasUnsupportedSceneShape } from './sceneShape'
 import { showCompletionNotification } from '@shared/utils/notification'
 import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
@@ -307,13 +308,8 @@ async function executeExtensionNode(
           selectedImagePath, selectedImageData } = ctx
 
   const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
-  if (ext) {
-    const usesSceneInput = ext.input === 'scene' || ext.inputs?.includes('scene') === true
-    if ((ext.type === 'process' && (usesSceneInput || ext.output === 'scene'))
-        || (ext.type === 'model' && usesSceneInput
-          && (ext.inputs !== undefined || ext.input !== 'scene'))) {
-      throw new Error(`${ext.name} uses an unsupported scene input or output declaration`)
-    }
+  if (ext && hasUnsupportedSceneShape(ext)) {
+    throw new Error(`${ext.name} uses an unsupported scene input or output declaration`)
   }
   // Freshest params at the moment the node starts (so loop iterations / Retry pick
   // up edits made while paused, not the values captured at run start).

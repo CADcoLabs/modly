@@ -17,7 +17,11 @@ import re as _re
 import services.generator_registry as registry
 from services.generator_registry import generator_registry
 from schemas.generation import GenerateFromArtifactRequest, JobStatus
-from services.artifact_input import TypedArtifactInput, validate_artifact_input
+from services.artifact_input import (
+    RESERVED_ARTIFACT_PARAMS,
+    TypedArtifactInput,
+    validate_artifact_input,
+)
 
 router = APIRouter(tags=["generation"])
 
@@ -149,11 +153,6 @@ async def generate_from_image(
     return {"job_id": job_id}
 
 
-_RESERVED_ARTIFACT_PARAMS = {
-    "artifact_path", "input_kind", "input_path", "scene_path", "scene_manifest_path",
-}
-
-
 @router.post("/from-artifact")
 async def generate_from_artifact(
     request: GenerateFromArtifactRequest,
@@ -172,7 +171,7 @@ async def generate_from_artifact(
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    params = {k: v for k, v in request.params.items() if k not in _RESERVED_ARTIFACT_PARAMS}
+    params = {k: v for k, v in request.params.items() if k not in RESERVED_ARTIFACT_PARAMS}
     params["scene_manifest_path"] = str(artifact.path)
     collection = sanitize_collection(request.collection)
     job_id = str(uuid.uuid4())
@@ -234,6 +233,11 @@ async def _run_generation(
     # starve the worker that performs generation.
     loop = asyncio.get_running_loop()
     executor = _pinned_generation_executor if model_id is not None else None
+    # Shown while this job waits behind another one on the single worker;
+    # _run_generation_impl clears it as soon as the job actually starts.
+    queued_job = _jobs.get(job_id)
+    if queued_job is not None and executor is not None:
+        queued_job.step = "Waiting for the previous generation…"
     future = loop.run_in_executor(
         executor,
         _run_generation_impl,
@@ -272,6 +276,7 @@ def _run_generation_impl(
         return
     job = _jobs[job_id]
     job.status = "running"
+    job.step = None
 
     def progress_cb(pct: int, step: str = "") -> None:
         # Monotonic: the loading phase walks the bar up on a background thread and

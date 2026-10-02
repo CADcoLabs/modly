@@ -1,5 +1,6 @@
 import type { Workflow, WFNode } from '@shared/types/electron.d'
 import { getWorkflowExtension, type WorkflowExtension } from './mockExtensions'
+import { hasUnsupportedSceneShape } from './sceneShape'
 import { isPassthrough, isBranchConsumer, resolveDataSource, nearestUpstreamWaits } from './nodeBehaviors'
 
 type DataType = 'image' | 'text' | 'mesh' | 'audio' | 'scene'
@@ -131,12 +132,7 @@ export function validateWorkflowPreflight(
       continue
     }
 
-    const usesSceneInput = ext.input === 'scene' || ext.inputs?.includes('scene') === true
-    const unsupportedSceneShape =
-      (ext.type === 'process' && (usesSceneInput || ext.output === 'scene'))
-      || (ext.type === 'model' && usesSceneInput
-        && (ext.inputs !== undefined || ext.input !== 'scene'))
-    if (unsupportedSceneShape) {
+    if (hasUnsupportedSceneShape(ext)) {
       pushIssue(issues, {
         key: `${node.id}:unsupported-scene-shape`,
         nodeId: node.id,
