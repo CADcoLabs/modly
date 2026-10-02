@@ -180,14 +180,37 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   const notifyWeightChange = () => {
     getWindow()?.webContents.send('model:weightsChanged')
   }
-  async function unloadForRemoval(modelIds?: string[]) {
-    const urls = modelIds
-      ? modelIds.map((id) => `${API_BASE_URL}/model/unload/${encodeURIComponent(id)}`)
-      : [`${API_BASE_URL}/model/unload-all`]
-    for (const url of urls) {
-      const response = await axios.post(url, {}, { timeout: 40_000 })
-      if (response.data?.unloaded !== true) throw new Error('Model unload was not confirmed; weights were preserved')
+  // No backend listening means no Python process can hold the weight files
+  // open, so deletion is safe. A backend that answers (or times out) is not.
+  const backendUnreachable = (err: unknown): boolean => {
+    if (!axios.isAxiosError(err) || err.response) return false
+    const cause = (err as { cause?: { code?: string } }).cause
+    return err.code === 'ECONNREFUSED' || cause?.code === 'ECONNREFUSED'
+  }
+  async function unloadForRemoval(modelIds: string[]) {
+    for (const id of modelIds) {
+      try {
+        const response = await axios.post(
+          `${API_BASE_URL}/model/unload/${encodeURIComponent(id)}`, {}, { timeout: 40_000 },
+        )
+        if (response.data?.unloaded !== true) throw new Error('Model unload was not confirmed; weights were preserved')
+      } catch (err) {
+        if (backendUnreachable(err)) return
+        throw err
+      }
     }
+  }
+  // Unload only this extension's generators, not every model in the app.
+  async function unloadExtensionForRemoval(extensionId: string) {
+    let modelIds: string[]
+    try {
+      const { data } = await axios.get<{ id: string }[]>(`${API_BASE_URL}/model/all`, { timeout: 10_000 })
+      modelIds = data.map((model) => model.id).filter((id) => id.startsWith(`${extensionId}/`))
+    } catch (err) {
+      if (backendUnreachable(err)) return
+      throw err
+    }
+    await unloadForRemoval(modelIds)
   }
   // Logging from renderer
   ipcMain.on('log:error', (_event, message: string) => logger.error(`[Renderer] ${message}`))
@@ -530,7 +553,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         safeExtensionId,
       )
       const removed = await weightOperations.remove(
-        [extensionRoot], () => unloadForRemoval(), () => rmWithRetry(extensionRoot, 'extension-model-delete'),
+        [extensionRoot],
+        () => unloadExtensionForRemoval(safeExtensionId),
+        () => rmWithRetry(extensionRoot, 'extension-model-delete'),
       )
       notifyWeightChange()
       if (removed.ok) return { success: true }

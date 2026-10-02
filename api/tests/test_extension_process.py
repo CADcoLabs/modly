@@ -145,7 +145,7 @@ class BuildEnvTests(unittest.TestCase):
         self.assertEqual(env["MODEL_NODE_ID"], "quality")
         self.assertEqual(
             json.loads(env["SHARED_MODEL_DIRS"]),
-            {"base": "/tmp/models/ext/_shared/base"},
+            {"base": str(Path("/tmp/models/ext/_shared/base"))},
         )
 
 

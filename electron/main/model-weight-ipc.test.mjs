@@ -40,6 +40,7 @@ function fixture(t) {
   const handlers = new Map(), events = [], removed = [], calls = []
   const hooks = {
     unload: async () => ({ data: { unloaded: true } }),
+    listModels: async () => ({ data: [{ id: 'demo/a' }, { id: 'demo/b' }, { id: 'other/generate' }] }),
     download: async (id) => {
       const dir = realSources.resolveWeightStorageRoot(settings.modelsDir, id)
       mkdirSync(dir, { recursive: true })
@@ -49,7 +50,11 @@ function fixture(t) {
   const stub = new Proxy({}, { get: () => () => {} })
   const deps = (name) => {
     if (name === 'electron') return { ipcMain: { handle: (id, fn) => handlers.set(id, fn), on: () => {} }, app: { getPath: () => root, on: () => {} } }
-    if (name === 'axios') return { post: (...args) => hooks.unload(...args) }
+    if (name === 'axios') return {
+      post: (...args) => hooks.unload(...args),
+      get: (...args) => hooks.listModels(...args),
+      isAxiosError: (err) => Boolean(err?.isAxiosError),
+    }
     if (name === './model-sources') return realSources
     if (name === './model-download-plan') return realPlan
     if (name === './extension-path-guard') return realGuard
@@ -95,6 +100,29 @@ for (const action of ['deleteSharedGroup', 'deleteExtensionWeights']) {
     assert.equal((await f.invoke('download', 'demo/a')).success, true)
   })
 }
+
+function connectionRefused() {
+  return Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8765'), { isAxiosError: true, code: 'ECONNREFUSED' })
+}
+
+for (const action of ['deleteSharedGroup', 'deleteExtensionWeights']) {
+  test(`${action} still removes weights when the backend is not running`, async (t) => {
+    // No backend means no Python process can hold the files open.
+    const f = fixture(t)
+    await f.invoke('download', 'demo/a')
+    f.hooks.unload = async () => { throw connectionRefused() }
+    f.hooks.listModels = async () => { throw connectionRefused() }
+    assert.equal((await f.invoke(action, 'demo', 'base')).success, true)
+    assert.equal(f.removed.length, 1)
+  })
+}
+
+test('deleteExtensionWeights unloads only that extension models', async (t) => {
+  const f = fixture(t), unloaded = []
+  f.hooks.unload = async (url) => { unloaded.push(url); return { data: { unloaded: true } } }
+  assert.equal((await f.invoke('deleteExtensionWeights', 'demo')).success, true)
+  assert.deepEqual(unloaded, ['http://test/model/unload/demo%2Fa', 'http://test/model/unload/demo%2Fb'])
+})
 
 test('active download blocks deletion, including a complete base needed by a private adapter', async (t) => {
   const f = fixture(t)

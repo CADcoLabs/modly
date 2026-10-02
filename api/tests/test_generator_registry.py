@@ -739,6 +739,32 @@ class _StatusOnlyGenerator:
         return [{"id": "steps"}]
 
 
+class _DirectGenerator:
+    def __init__(self, sticky: bool = False) -> None:
+        self.loaded = True
+        self.sticky = sticky
+
+    def unload(self) -> None:
+        if not self.sticky:
+            self.loaded = False
+
+    def is_loaded(self) -> bool:
+        return self.loaded
+
+
+class GeneratorRegistryUnloadTests(unittest.TestCase):
+    def test_unload_all_unloads_every_model_before_reporting_a_stuck_one(self):
+        registry = GeneratorRegistry()
+        stuck = _DirectGenerator(sticky=True)
+        other = _DirectGenerator()
+        registry._generators = {"demo/stuck": stuck, "demo/other": other}
+
+        with self.assertRaisesRegex(RuntimeError, "demo/stuck"):
+            registry.unload_all()
+
+        self.assertFalse(other.loaded)
+
+
 class GeneratorRegistryLockTests(unittest.TestCase):
     def test_status_reads_do_not_wait_for_an_in_progress_load(self):
         # A load holds the lifecycle lock for its whole duration (first-run
