@@ -1,7 +1,7 @@
 import { useCallback, useRef } from 'react'
 import { useAppStore } from '@shared/stores/appStore'
 import { useApi } from './useApi'
-import { showCompletionNotification } from '@shared/utils/notification'
+import { showCompletionNotification, showErrorNotification } from '@shared/utils/notification'
 
 export function useGeneration() {
   const { currentJob, setCurrentJob, updateCurrentJob, generationOptions, selectedImageData, pushMeshUrl, clearMeshHistory } = useAppStore()
@@ -53,6 +53,7 @@ export function useGeneration() {
           status: 'error',
           error: errorMessage
         })
+        void showErrorNotification(errorMessage, 'Generation failed')
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps -- useApi re-creates its fns each render, so this re-memoizes anyway (values stay fresh)
@@ -85,6 +86,7 @@ export function useGeneration() {
 
       if (result.status === 'error') {
         updateCurrentJob({ status: 'error', error: result.error })
+        void showErrorNotification(result.error ?? 'Unknown error', 'Generation failed')
         break
       }
 

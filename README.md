@@ -148,6 +148,65 @@ supported provider is `huggingface`. Existing nodes that use `hf_repo`,
 `download_check`, `hf_include_prefixes`, and `hf_skip_prefixes` keep their
 original behavior.
 
+### Shared weights inside one model extension
+
+Multi-node model extensions can declare extension-scoped `weight_groups` and
+reference them from any sibling node. Shared files are downloaded once under
+`<models-dir>/<extension-id>/_shared/<group-id>`, while node-specific
+`model_sources` stay under the node's existing model directory.
+
+```json
+{
+  "id": "pixal3d",
+  "type": "model",
+  "weight_groups": [
+    {
+      "id": "pixal3d-base",
+      "model_sources": [
+        {
+          "id": "base",
+          "provider": "huggingface",
+          "repo_id": "TencentARC/Pixal3D",
+          "revision": "<pinned-revision>",
+          "destination": ".",
+          "checks": ["pipeline.json"]
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "generate",
+      "weight_groups": ["pixal3d-base"]
+    },
+    {
+      "id": "worldsculpt",
+      "weight_groups": ["pixal3d-base"],
+      "model_sources": [
+        {
+          "id": "adapter",
+          "provider": "huggingface",
+          "repo_id": "AlayaLab/WorldSculpt",
+          "revision": "<pinned-revision>",
+          "destination": ".",
+          "checks": ["model.safetensors"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+At runtime, `MODEL_DIR` remains the selected node's private directory.
+Subprocess extensions also receive `MODEL_ID`, `MODEL_NODE_ID`, and a JSON
+`SHARED_MODEL_DIRS` map in their environment. Both direct and subprocess generator
+instances receive `MODEL_ID`, `MODEL_NODE_ID`, and the resolved mapping in
+`shared_model_dirs` before `load()`. Direct generators use these instance attributes,
+not process-global environment variables, to distinguish sibling nodes.
+Shared groups are installed through their dependent nodes; the drawer exposes
+shared-group status and explicit removal. Removing private node data never removes a shared group;
+shared-group removal is a separate action that identifies every affected node.
+
 ### Separately installable weight variants
 
 A model node that publishes the same weights in several variants (quantizations,
@@ -203,6 +262,10 @@ lists every variant under the node, and each one is downloaded or deleted on its
   variant's files excluded automatically) plus one variant: the one asked for, or the
   `default` one — the first option when `default` is omitted. Files already complete
   on disk are skipped, so adding a second variant only fetches that variant.
+  Only declared variants are excluded from the shared pass: keep
+  `hf_include_prefixes` narrow enough that a variant the repository publishes but
+  the manifest does not declare (e.g. an extra `dit/model_Q8_0.gguf`) is not
+  downloaded with every install.
 - A variant is installed when all of its `checks` exist; the node is installed once
   its `download_check` and at least one variant are present.
 - Generation fails with an explicit message when the selected variant is not
@@ -215,6 +278,18 @@ lists every variant under the node, and each one is downloaded or deleted on its
 
 ## Workflows
 Start with a basic workflow first. For example, on the "Workflows" tab, try: Image -> Generate Mesh -> Add to Scene. Make sure there is a connection between each of the steps. Go to the "Generate" tab, make sure the workflow is selected, then click on "Generate 3D Model". Click on "Settings/Logs/Errors" to see any issues.
+
+Model extensions may also declare `scene` as a node input or output. A scene is
+a workspace directory containing `scene-manifest.json` with schema
+`modly.scene-manifest.v1`; it is not an arbitrary JSON file. Use the **Load
+Scene** workflow node to select and validate an existing scene directory.
+Scene-capable generators implement `generate_artifact(input_kind,
+artifact_path, ...)`; legacy image generators and `POST /generate/from-image`
+remain unchanged. The generic `POST /generate/from-artifact` boundary currently
+accepts only `scene`, leaving future artifact kinds to separate reviewed changes.
+For this first contract, `scene` is model-only and must be declared as the single
+`input` value (not inside `inputs`); process and mixed-input scene nodes are rejected.
+Model nodes may still accept multiple images and produce a scene.
 
 
 ## Modly CLI

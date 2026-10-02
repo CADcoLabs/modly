@@ -42,7 +42,7 @@ class _FakeRegistry:
         # Report loaded so _run_generation skips the download/load thread.
         return {"loaded": True, "name": "fake", "downloaded": True}
 
-    def assert_weight_variant_installed(self, params: dict) -> None:
+    def assert_weight_variant_installed(self, params: dict, model_id=None) -> None:
         pass
 
     def get_active(self) -> _FakeGenerator:
@@ -51,6 +51,9 @@ class _FakeRegistry:
     # generate_from_image looks the model up and switches to it before filing the job.
     def get_generator(self, model_id: str) -> _FakeGenerator:
         return self._gen
+
+    def get_manifest(self, model_id: str) -> dict:
+        return {"output": "mesh"}
 
     def switch_model(self, model_id: str) -> None:
         pass
@@ -106,7 +109,7 @@ class RunGenerationWorkspaceTests(unittest.TestCase):
 
     def test_missing_weight_variant_fails_the_job_before_generation(self) -> None:
         class _MissingVariantRegistry(_FakeRegistry):
-            def assert_weight_variant_installed(self, params: dict) -> None:
+            def assert_weight_variant_installed(self, params: dict, model_id=None) -> None:
                 raise RuntimeError(f'{params["gguf_quant"]} weights for trellis2/generate are not installed.')
 
         gen = _FakeGenerator()

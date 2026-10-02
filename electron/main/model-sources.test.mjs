@@ -114,6 +114,67 @@ test('requires every declared check and rejects symlinked extension-root ancestr
   }
 })
 
+test('validates extension-scoped groups and canonicalizes sibling references', () => {
+  const { normalizeWeightGroups, normalizeWeightGroupReferences } = loadModule()
+  const groups = normalizeWeightGroups({
+    weight_groups: [{
+      id: 'Base-Weights',
+      model_sources: validNode().model_sources,
+    }],
+  })
+  assert.deepEqual(
+    normalizeWeightGroupReferences({ weight_groups: ['base-weights'] }, groups),
+    ['Base-Weights'],
+  )
+  assert.throws(
+    () => normalizeWeightGroupReferences({ weight_groups: ['missing'] }, groups),
+    /unknown weight group/i,
+  )
+  assert.throws(
+    () => normalizeWeightGroups({
+      weight_groups: [
+        { id: 'base', model_sources: validNode().model_sources },
+        { id: 'BASE', model_sources: validNode().model_sources },
+      ],
+    }),
+    /portable-unique/i,
+  )
+})
+
+test('stores and checks shared weights under the reserved extension root', () => {
+  const {
+    areWeightGroupSourcesDownloaded,
+    normalizeWeightGroups,
+    resolveModelRoot,
+    resolveWeightGroupRoot,
+    resolveWeightStorageRoot,
+  } = loadModule()
+  const root = mkdtempSync(join(tmpdir(), 'modly-shared-readiness-'))
+  const models = join(root, 'models')
+  const [group] = normalizeWeightGroups({
+    weight_groups: [{
+      id: 'base',
+      model_sources: [{
+        id: 'primary', provider: 'huggingface', repo_id: 'org/base',
+        destination: '.', checks: ['model.bin'],
+      }],
+    }],
+  })
+  const groupRoot = join(models, 'demo', '_shared', 'base')
+  try {
+    assert.equal(resolveWeightGroupRoot(models, 'demo', 'base'), groupRoot)
+    assert.equal(resolveWeightStorageRoot(models, 'demo/_shared/base'), groupRoot)
+    assert.throws(() => resolveModelRoot(models, 'demo/_shared'), /reserved/i)
+    assert.equal(areWeightGroupSourcesDownloaded(models, 'demo', group), false)
+    mkdirSync(groupRoot, { recursive: true })
+    writeFileSync(join(groupRoot, 'model.bin'), 'weights')
+    assert.equal(areWeightGroupSourcesDownloaded(models, 'demo', group), true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+
 const quantNode = () => ({
   hf_repo: 'org/model-gguf',
   download_check: 'pipeline.json',
@@ -149,6 +210,7 @@ test('validates weight variants and rejects ambiguous or unsafe declarations', (
   const cases = [
     [{ ...node, hf_repo: undefined }, /requires hf_repo/],
     [{ ...node, model_sources: [] }, /cannot be combined/],
+    [{ ...node, weight_groups: ['base'] }, /cannot be combined with weight_groups/],
     [{ ...node, download_check: 'dit/model_Q4.gguf' }, /download_check/],
     [withOptions([q4, q5], { default: 'Q8' }), /default/],
     [withOptions([q4, { ...q5, include_prefixes: ['dit/'] }]), /share files/],
