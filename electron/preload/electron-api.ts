@@ -130,12 +130,16 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
       isDownloaded:   (modelId: string) => ipcRenderer.invoke('model:isDownloaded', modelId),
       hasLocalData:    (modelId: string) => ipcRenderer.invoke('model:hasLocalData', modelId),
       sharedGroups:    (extensionId: string) => ipcRenderer.invoke('model:sharedGroups', extensionId),
-      download:       (modelId: string) => ipcRenderer.invoke('model:download', modelId),
+      download:       (modelId: string, variantId?: string) => (variantId === undefined
+        ? ipcRenderer.invoke('model:download', modelId)
+        : ipcRenderer.invoke('model:download', modelId, variantId)),
       pauseDownload:  (modelId: string) => ipcRenderer.invoke('model:pauseDownload', modelId),
       cancelDownload: (modelId: string) => ipcRenderer.invoke('model:cancelDownload', modelId),
       delete:         (modelId: string) => ipcRenderer.invoke('model:delete', modelId),
       deleteSharedGroup: (extensionId: string, groupId: string) => ipcRenderer.invoke('model:deleteSharedGroup', extensionId, groupId),
       deleteExtensionWeights: (extensionId: string) => ipcRenderer.invoke('model:deleteExtensionWeights', extensionId),
+      installedWeightVariants: (modelId: string) => ipcRenderer.invoke('model:installedWeightVariants', modelId),
+      deleteWeightVariant: (modelId: string, variantId: string) => ipcRenderer.invoke('model:deleteWeightVariant', modelId, variantId),
       unloadAll:      () => ipcRenderer.invoke('model:unloadAll'),
       showInFolder:   (modelId: string) => ipcRenderer.invoke('model:showInFolder', modelId),
       activeDownloads: (): Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]> =>

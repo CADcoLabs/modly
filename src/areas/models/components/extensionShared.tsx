@@ -12,6 +12,7 @@ export interface DownloadInfo {
   totalBytes?: number
   stalledSeconds?: number
   paused?: boolean
+  variantId?: string   // set when the download targets one weight variant of the node
 }
 
 export type DownloadMap = Record<string, DownloadInfo>

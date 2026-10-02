@@ -332,6 +332,70 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         self.assertEqual(adapter.MODEL_NODE_ID, "adapter")
         self.assertFalse(self.registry._is_downloaded("shared-model/adapter", adapter))
 
+    def test_selected_weight_variant_must_be_installed_before_generation(self) -> None:
+        def variant(quant: str) -> dict:
+            return {
+                "id": quant,
+                "include_prefixes": [f"dit_{quant}.gguf"],
+                "checks": [f"dit_{quant}.gguf"],
+            }
+
+        extension = self._make_extension("quantized")
+        manifest = {
+            "id": "quantized",
+            "name": "quantized",
+            "type": "model",
+            "generator_class": "TestGenerator",
+            "params_schema": [
+                {"id": "quant", "type": "select", "options": [{"value": "Q4"}, {"value": "Q5"}]}
+            ],
+            "nodes": [{
+                "id": "generate",
+                "hf_repo": "org/model-gguf",
+                "download_check": "pipeline.json",
+                "weight_variants": {
+                    "param": "quant",
+                    "default": "Q5",
+                    "options": [variant("Q4"), variant("Q5")],
+                },
+            }],
+        }
+        (extension / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (extension / "generator.py").write_text(
+            "\n".join([
+                "from services.generators.base import BaseGenerator",
+                "class TestGenerator(BaseGenerator):",
+                "    def is_downloaded(self): return True",
+                "    def load(self): self._model = object()",
+                "    def generate(self, image_bytes, params, progress_cb=None, cancel_event=None):",
+                "        return self.outputs_dir / 'result.glb'",
+            ]),
+            encoding="utf-8",
+        )
+
+        self.registry.initialize()
+        manifest_variants = self.registry.get_manifest("quantized/generate")["weight_variants"]
+        self.assertEqual([option["id"] for option in manifest_variants["options"]], ["Q4", "Q5"])
+
+        model_root = self.models_dir / "quantized" / "generate"
+        model_root.mkdir(parents=True)
+        (model_root / "dit_Q5.gguf").write_bytes(b"q5")
+        # The job's model is checked, not whichever model is still active: the
+        # switch to the job's model only happens once the job starts running.
+        self.registry._active_id = "other/generate"
+        model_id = "quantized/generate"
+        self.registry.assert_weight_variant_installed({}, model_id)
+        self.registry.assert_weight_variant_installed({"quant": "Q5"}, model_id)
+        self.registry.assert_weight_variant_installed({"quant": "fp16"}, model_id)
+        with self.assertRaisesRegex(RuntimeError, "Q4 weights for quantized/generate are not installed"):
+            self.registry.assert_weight_variant_installed({"quant": "Q4"}, model_id)
+
+        # Without an explicit model id the active one is used (legacy callers).
+        self.registry._active_id = model_id
+        with self.assertRaisesRegex(RuntimeError, "Q4 weights"):
+            self.registry.assert_weight_variant_installed({"quant": "Q4"})
+
+
     def test_activate_ready_generator_switches_before_loading_exact_model(self) -> None:
         class Generator:
             DISPLAY_NAME = "test"
@@ -621,6 +685,27 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         self.registry.reload(capability)
         self.assertNotIn("pending-update/generate", self.registry._generators)
         self.assertIn("pending-update/generate", self.registry.load_errors())
+
+    @unittest.skipUnless(sys.platform == "win32", "8.3 short paths are Windows-only")
+    def test_valid_capability_authorizes_extension_under_a_short_path(self) -> None:
+        # GitHub's Windows runners use an 8.3 TEMP (C:\Users\RUNNER~1\...): the
+        # capability destination is resolved (long form) while discovery walks
+        # the configured, short-form EXTENSIONS_DIR.
+        import ctypes
+
+        capability = self._make_loadable_pending_extension("pending-short")
+        buffer = ctypes.create_unicode_buffer(32768)
+        if not ctypes.windll.kernel32.GetShortPathNameW(str(self.extensions_dir), buffer, len(buffer)):
+            self.skipTest("short path unavailable")
+        short_dir = Path(buffer.value)
+        if str(short_dir) == str(self.extensions_dir):
+            self.skipTest("8.3 names are disabled on this volume")
+        registry_module.EXTENSIONS_DIR = short_dir
+
+        self.registry.reload(capability)
+
+        self.assertIn("pending-short/generate", self.registry._generators)
+        self.assertEqual(self.registry.load_errors(), {})
 
     def test_public_reload_and_predictable_id_cannot_bypass_pending_state(self) -> None:
         self._make_loadable_pending_extension("pending-public")

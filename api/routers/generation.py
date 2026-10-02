@@ -288,6 +288,10 @@ def _run_generation_impl(
             job.step = step
 
     try:
+        # Refuse a selected weight variant that is not installed before loading
+        # anything. Uses the job's model: the switch to it happens below.
+        generator_registry.assert_weight_variant_installed(params, model_id)
+
         # Check if the model needs to be loaded BEFORE calling the generator
         # getter, because that call can load the model in a blocking manner.
         get_generator = (lambda: generator_registry.activate_ready_generator(model_id)) \

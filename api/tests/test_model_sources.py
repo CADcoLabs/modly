@@ -4,10 +4,13 @@ import unittest
 from pathlib import Path
 
 from services.model_sources import (
+    installed_weight_variants,
+    missing_weight_variant,
     model_sources_are_downloaded,
     normalize_model_sources,
     normalize_weight_group_references,
     normalize_weight_groups,
+    normalize_weight_variants,
     resolve_model_root,
     resolve_weight_group_root,
     resolve_weight_storage_root,
@@ -174,6 +177,72 @@ class ModelSourcesTests(unittest.TestCase):
             group_root.mkdir(parents=True)
             (group_root / "model.bin").write_bytes(b"weights")
             self.assertTrue(weight_group_sources_are_downloaded(models, "demo", group))
+
+    def test_weight_variants_validate_and_report_the_missing_selection(self) -> None:
+        def variant(quant: str) -> dict:
+            return {
+                "id": quant,
+                "include_prefixes": [f"dit/model_{quant}.gguf"],
+                "checks": [f"dit/model_{quant}.gguf"],
+            }
+
+        node = {
+            "hf_repo": "org/model-gguf",
+            "download_check": "pipeline.json",
+            "params_schema": [
+                {"id": "quant", "type": "select", "options": [{"value": "Q4"}, {"value": "Q5"}]}
+            ],
+            "weight_variants": {"param": "quant", "options": [variant("Q4"), variant("Q5")]},
+        }
+        variants = normalize_weight_variants(node) or {}
+        self.assertEqual(variants["default"], "Q4")
+        self.assertIsNone(normalize_weight_variants({"hf_repo": "org/model"}))
+
+        def with_options(options: list, **extra) -> dict:
+            return {**node, "weight_variants": {"param": "quant", "options": options, **extra}}
+
+        overlapping = {**variant("Q5"), "include_prefixes": ["dit/"]}
+        for broken, message in (
+            ({**node, "hf_repo": ""}, "requires hf_repo"),
+            ({**node, "model_sources": []}, "cannot be combined"),
+            ({**node, "weight_groups": ["base"]}, "cannot be combined with weight_groups"),
+            ({**node, "download_check": "dit/model_Q4.gguf"}, "download_check"),
+            (with_options([variant("Q4"), overlapping]), "share files"),
+            (with_options([variant("Q4")], default="Q8"), "default"),
+            (with_options([{**variant("Q4"), "checks": ["x.gguf"]}]), "not covered"),
+            (with_options([{**variant("Q4"), "size_gb": True}]), "size_gb"),
+            (with_options([{**variant("Q4"), "vram_gb": 0}]), "vram_gb"),
+            (with_options([{**variant("Q4"), "vram_gb": "6"}]), "vram_gb"),
+            ({**node, "params_schema": []}, "must name a params_schema entry"),
+            (
+                {**node, "params_schema": [{"id": "quant", "options": [{"value": "Q5"}]}]},
+                "must offer every weight variant id",
+            ),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                normalize_weight_variants(broken)
+
+        # A param that declares no options is left to the node to interpret.
+        self.assertIsNotNone(
+            normalize_weight_variants({**node, "params_schema": [{"id": "quant", "type": "string"}]})
+        )
+        self.assertNotIn("vram_gb", variants["options"][0])
+        with_vram = normalize_weight_variants(with_options([{**variant("Q4"), "vram_gb": 6.5}])) or {}
+        self.assertEqual(with_vram["options"][0]["vram_gb"], 6.5)
+
+        with tempfile.TemporaryDirectory(prefix="modly-weight-variants-") as tmp:
+            models = Path(tmp) / "models"
+            dit = models / "trellis" / "generate" / "dit"
+            dit.mkdir(parents=True)
+            (dit / "model_Q5.gguf").write_bytes(b"q5")
+            (dit / "model_Q4.gguf").write_bytes(b"")
+            self.assertEqual(installed_weight_variants(models, "trellis/generate", variants), ["Q5"])
+            missing = missing_weight_variant(models, "trellis/generate", variants, {})
+            self.assertEqual((missing or {}).get("id"), "Q4")
+            for params in ({"quant": "Q5"}, {"quant": "fp16"}):
+                with self.subTest(params=params):
+                    self.assertIsNone(missing_weight_variant(models, "trellis/generate", variants, params))
+            self.assertIsNone(missing_weight_variant(models, "trellis/generate", None, {"quant": "Q4"}))
 
 
 if __name__ == "__main__":

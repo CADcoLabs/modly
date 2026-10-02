@@ -181,3 +181,55 @@ test('rejects unknown groups, reserved node ids, and legacy private aliases', as
     }
   }
 })
+
+test('downloads a weight-variant node as shared files first, then one variant at a time', async () => {
+  const { legacyDownloadSteps, resolveInstalledModelDownloadPlan } = loadModule()
+  const fixture = setupExtension({
+    id: 'trellis',
+    type: 'model',
+    nodes: [{
+      id: 'generate',
+      hf_repo: 'org/model-gguf',
+      download_check: 'pipeline.json',
+      hf_include_prefixes: ['pipeline.json', 'dit/'],
+      hf_skip_prefixes: ['README.md'],
+      params_schema: [{ id: 'quant', type: 'select', options: [{ value: 'Q4' }, { value: 'Q5' }] }],
+      weight_variants: {
+        param: 'quant',
+        default: 'Q5',
+        options: ['Q4', 'Q5'].map((quant) => ({
+          id: quant,
+          include_prefixes: [`dit/model_${quant}.gguf`],
+          checks: [`dit/model_${quant}.gguf`],
+        })),
+      },
+    }],
+  })
+  try {
+    const plan = await resolveInstalledModelDownloadPlan({
+      modelId: 'trellis/generate',
+      userExtensionsDir: fixture.user,
+      builtinExtensionsDir: fixture.builtin,
+    })
+    assert.equal(plan.kind, 'legacy')
+    assert.deepEqual(legacyDownloadSteps(plan), [
+      { includePrefixes: ['pipeline.json', 'dit/'], skipPrefixes: ['README.md', 'dit/model_Q4.gguf', 'dit/model_Q5.gguf'] },
+      { includePrefixes: ['dit/model_Q5.gguf'], skipPrefixes: ['README.md'] },
+    ])
+    // Picking one variant still fetches the shared files first, so a node installed
+    // variant-first is never left without its pipeline files.
+    assert.deepEqual(legacyDownloadSteps(plan, 'Q4'), [
+      { includePrefixes: ['pipeline.json', 'dit/'], skipPrefixes: ['README.md', 'dit/model_Q4.gguf', 'dit/model_Q5.gguf'] },
+      { includePrefixes: ['dit/model_Q4.gguf'], skipPrefixes: ['README.md'] },
+    ])
+    assert.throws(() => legacyDownloadSteps(plan, 'Q8'), /no weight variant "Q8"/)
+
+    const withoutVariants = { ...plan, weightVariants: undefined }
+    assert.deepEqual(legacyDownloadSteps(withoutVariants), [
+      { includePrefixes: ['pipeline.json', 'dit/'], skipPrefixes: ['README.md'] },
+    ])
+    assert.throws(() => legacyDownloadSteps(withoutVariants, 'Q4'), /no weight variant/)
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
