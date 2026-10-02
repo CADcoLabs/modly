@@ -10,7 +10,13 @@ export interface InstallManifest {
   entry?: string
   generator_class?: string
   model_sources?: unknown
-  nodes?: Array<{ id?: string; model_sources?: unknown } & ModelSourceNode>
+  nodes?: Array<{
+    id?: string
+    input?: unknown
+    inputs?: unknown
+    output?: unknown
+    model_sources?: unknown
+  } & ModelSourceNode>
 }
 
 export interface ValidatedInstallManifest {
@@ -25,6 +31,21 @@ export interface ExtensionReloadPayload {
   reloaded: true
   models: string[]
   errors: Record<string, string>
+}
+
+export function assertSupportedSceneNodeShape(
+  kind: 'model' | 'process',
+  node: { id?: string; input?: unknown; inputs?: unknown; output?: unknown },
+  declaredInputs: unknown[],
+  output: unknown,
+): void {
+  const usesSceneInput = declaredInputs.includes('scene')
+  if (kind === 'process' && (usesSceneInput || output === 'scene')) {
+    throw new Error('manifest.json: scene input and output are supported only for model nodes')
+  }
+  if (kind === 'model' && usesSceneInput && (node.inputs !== undefined || node.input !== 'scene')) {
+    throw new Error(`manifest.json: ${node.id ?? 'node'} must declare scene as its single input field`)
+  }
 }
 
 export type IncompleteInstallRecoveryAction =
@@ -45,11 +66,13 @@ export function validateInstallManifest(
   const isProcess = manifest.type === 'process'
   const entryFile = manifest.entry ?? 'processor.js'
   const nodes = Array.isArray(manifest.nodes) ? manifest.nodes.filter((node) => node?.id) : []
-
   if (manifest.model_sources !== undefined) {
     throw new Error('manifest.json: model_sources must be declared on a model node')
   }
   for (const node of Array.isArray(manifest.nodes) ? manifest.nodes : []) {
+    const declaredInputs = Array.isArray(node.inputs) ? node.inputs : [node.input ?? 'image']
+    const output = node.output ?? 'mesh'
+    assertSupportedSceneNodeShape(isProcess ? 'process' : 'model', node, declaredInputs, output)
     if (node.model_sources === undefined) continue
     if (isProcess) {
       throw new Error('manifest.json: model_sources is supported only for model nodes')

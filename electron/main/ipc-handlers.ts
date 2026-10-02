@@ -49,6 +49,7 @@ import {
   validateExtensionReloadPayload,
   validateExistingExtensionReplacement,
   validateInstallManifest,
+  assertSupportedSceneNodeShape,
 } from './extension-install-utils'
 import {
   beginExtensionRegistrationTransaction,
@@ -67,6 +68,7 @@ import {
 } from './extension-install-recovery'
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
 import { updatesSupported } from './updater'
+import { readLocalFileBase64 } from './bounded-file-reader'
 
 type WindowGetter = () => BrowserWindow | null
 const pExecFile = promisify(execFile)
@@ -378,13 +380,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // Read local file → base64 (bypasses file:// restrictions in the renderer)
-  ipcMain.handle('fs:readFileBase64', async (_, filePath: string) => {
-    if (typeof filePath !== 'string' || filePath.trim().length === 0) {
-      throw new Error('fs:readFileBase64 requires a non-empty file path')
-    }
-    const buffer = await readFile(filePath)
-    return buffer.toString('base64')
-  })
+  ipcMain.handle('fs:readFileBase64', (_, filePath: string) => readLocalFileBase64(filePath))
 
   ipcMain.handle('fs:readScreenshotDataUrl', async (_, filename: string) => {
     const filePath = app.isPackaged
@@ -844,10 +840,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     nodes?: {
       id:                string
       name?:             string
-      input?:            'mesh' | 'image' | 'text' | 'audio'
-      inputs?:           ('mesh' | 'image' | 'text' | 'audio')[]
+      input?:            string
+      inputs?:           string[]
       input_labels?:     string[]
-      output?:           'mesh' | 'image' | 'text' | 'audio'
+      output?:           string
       params_schema?:    unknown[]
       param_defaults?:   Record<string, unknown>
       hf_repo?:          string
@@ -874,6 +870,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       throw new Error('manifest.json: model_sources must be declared on a model node')
     }
     const nodes = (parsed.nodes ?? []).map(n => {
+      const declaredInputs = Array.isArray(n.inputs) ? n.inputs : [n.input ?? 'image']
+      const output = n.output ?? 'mesh'
+      assertSupportedSceneNodeShape(parsed.type === 'process' ? 'process' : 'model', n, declaredInputs, output)
       if (parsed.type === 'process' && n.model_sources !== undefined) {
         throw new Error('manifest.json: model_sources is supported only for model nodes')
       }
