@@ -215,6 +215,9 @@ export function ModelLibraryModal({ onClose }: { onClose: () => void }): JSX.Ele
     const dl     = downloads[m.id]
     const tags   = m.tags ?? []
     const inUse  = m.downloaded && localModel === m.id
+    // Code/CAD models are tools for workflow nodes, not chat models: the chat's
+    // own picker leaves them out, so they cannot become the agent's model here.
+    const nodeOnly = tags.some((t) => t === 'code' || t === 'cad')
     const fit    = vramFit(m.vram_estimate_mb, vramGb)
     // Size and VRAM say nothing about how well a model drives the agent — a 4B
     // outscores a 20B here. The tooltip keeps a measured rate and an estimate
@@ -264,6 +267,8 @@ export function ModelLibraryModal({ onClose }: { onClose: () => void }): JSX.Ele
             <>
               {inUse ? (
                 <span className="text-[11px] text-zinc-500">Used by the chat agent</span>
+              ) : nodeOnly ? (
+                <span className="text-[11px] text-zinc-500">For workflow nodes, not the chat</span>
               ) : (
                 <button onClick={() => setLocalModel(m.id)} className={outlineBtnCls}>Select</button>
               )}
