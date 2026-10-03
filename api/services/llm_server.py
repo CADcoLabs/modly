@@ -14,6 +14,7 @@ Nothing is hardcoded to a machine: the binary variant is picked per-platform
 models are chosen by the user from the catalog.
 """
 import contextlib
+import hashlib
 import os
 import re
 import shutil
@@ -342,25 +343,49 @@ def _download_asset(asset: dict, progress_cb: Callable[[dict], None], control_ch
     fd, tmp_name = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
     tmp = Path(tmp_name)
-    with urlopen(Request(asset["browser_download_url"], headers=_UA), timeout=30) as resp:
-        total = int(resp.headers.get("Content-Length", 0)) or asset.get("size", 0)
-        done = 0
-        last_emit = 0.0
-        with open(tmp, "wb") as fh:
-            while chunk := resp.read(1 << 20):
-                control_check()
-                fh.write(chunk)
-                done += len(chunk)
-                now = time.monotonic()
-                if now - last_emit >= 0.5:
-                    progress_cb({
-                        "status": f"Downloading {label} ({asset['name']})",
-                        "bytesDownloaded": done,
-                        "totalBytes": total,
-                        "percent": round(done / total * 100) if total else 0,
-                    })
-                    last_emit = now
+    sha256 = hashlib.sha256()
+    try:
+        with urlopen(Request(asset["browser_download_url"], headers=_UA), timeout=30) as resp:
+            total = int(resp.headers.get("Content-Length", 0)) or asset.get("size", 0)
+            done = 0
+            last_emit = 0.0
+            with open(tmp, "wb") as fh:
+                while chunk := resp.read(1 << 20):
+                    control_check()
+                    fh.write(chunk)
+                    sha256.update(chunk)
+                    done += len(chunk)
+                    now = time.monotonic()
+                    if now - last_emit >= 0.5:
+                        progress_cb({
+                            "status": f"Downloading {label} ({asset['name']})",
+                            "bytesDownloaded": done,
+                            "totalBytes": total,
+                            "percent": round(done / total * 100) if total else 0,
+                        })
+                        last_emit = now
+        _verify_digest(asset, sha256.hexdigest())
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # never leave a partial or rejected archive behind
+        raise
     return tmp
+
+
+def _verify_digest(asset: dict, actual_sha256: str) -> None:
+    """Refuse an archive whose bytes differ from what GitHub published for it.
+
+    The files extracted from it are executed (llama-server and its DLLs), so a
+    corrupted or tampered download must not get that far. GitHub reports a
+    `digest` ("sha256:<hex>") for every release asset; one without it (older
+    uploads) cannot be checked and is accepted as before."""
+    expected = asset.get("digest") or ""
+    if not expected.startswith("sha256:"):
+        return
+    if actual_sha256.lower() != expected[len("sha256:"):].lower():
+        raise RuntimeError(
+            f"Checksum mismatch for {asset['name']}: the download does not match the "
+            "published llama.cpp release. Try installing the engine again."
+        )
 
 
 _LIB_SUFFIXES = (".so", ".dylib", ".metal")
