@@ -402,7 +402,7 @@ export function ModelLibraryModal({ onClose }: { onClose: () => void }): JSX.Ele
         {/* Footer hint */}
         <div className="px-5 py-3 border-t border-zinc-800/70 shrink-0">
           <p className="text-[10px] text-zinc-600">
-            Custom models: drop any .gguf in <span className="text-zinc-500">{status?.models_dir ?? '~/.modly/llm/models'}</span> — detected automatically.
+            Custom models: drop any .gguf in <span className="text-zinc-500">{status?.models_dir ?? 'agent/models'}</span> — detected automatically.
           </p>
         </div>
       </div>

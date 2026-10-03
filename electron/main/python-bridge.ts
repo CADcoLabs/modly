@@ -3,7 +3,7 @@ import { join } from 'path'
 import { app, BrowserWindow } from 'electron'
 import { existsSync, mkdirSync } from 'fs'
 import axios from 'axios'
-import { getSettings } from './settings-store'
+import { ensureAgentDir, getSettings } from './settings-store'
 import { getHfToken } from './hf-token'
 import { logger } from './logger'
 import { cleanPythonEnv, getVenvPythonExe } from './python-setup'
@@ -65,6 +65,8 @@ export class PythonBridge {
         MODELS_DIR:             this.resolveModelsDir(),
         WORKSPACE_DIR:          this.resolveWorkspaceDir(),
         EXTENSIONS_DIR:         this.resolveExtensionsDir(),
+        // llm_server.py keeps everything of the local LLM here: engine, GGUF models, logs, config.
+        MODLY_LLM_DIR:          this.resolveAgentDir(),
         SELECTED_MODEL_ID:      process.env['SELECTED_MODEL_ID'] ?? '',
         HUGGING_FACE_HUB_TOKEN: this.resolveHfToken(),
         HF_TOKEN:               this.resolveHfToken(),
@@ -244,6 +246,10 @@ export class PythonBridge {
     const s = getSettings(app.getPath('userData'))
     mkdirSync(s.extensionsDir, { recursive: true })
     return s.extensionsDir
+  }
+
+  private resolveAgentDir(): string {
+    return ensureAgentDir(app.getPath('userData'))
   }
 
   private resolveHfToken(): string {

@@ -314,6 +314,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       workflowsDir:     join(baseDir, 'workflows'),
       extensionsDir:    join(baseDir, 'extensions'),
       dependenciesDir:  join(baseDir, 'dependencies'),
+      agentDir:         join(baseDir, 'agent'),
     })
   })
 

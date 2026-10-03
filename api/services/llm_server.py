@@ -1,9 +1,13 @@
 """
 Local LLM engine — manages a llama.cpp `llama-server` subprocess.
 
-Everything lives under the per-user directory ~/.modly/llm/:
-  bin/     llama-server binary + DLLs (auto-downloaded from GitHub releases)
-  models/  GGUF files (catalog downloads + any custom .gguf the user drops in)
+Everything lives under the agent directory (MODLY_LLM_DIR, set by Electron to
+the `agent` folder beside models/, extensions/, … — ~/.modly/llm/ when the API
+runs standalone):
+  bin/         llama-server binary + DLLs (auto-downloaded from GitHub releases)
+  models/      GGUF files (catalog downloads + any custom .gguf the user drops in)
+  logs/        one log per llama-server slot
+  config.json  pool settings (max_models)
 
 Nothing is hardcoded to a machine: the binary variant is picked per-platform
 (CUDA if an NVIDIA driver is present, otherwise Vulkan, otherwise CPU) and
