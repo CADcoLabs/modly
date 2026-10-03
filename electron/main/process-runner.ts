@@ -318,6 +318,19 @@ export function getExtPythonExe(extDir: string): string | null {
 // ─── Registry (one runner per extension id, reused across calls) ──────────────
 
 const registry = new Map<string, IProcessRunner>()
+// The arguments each cached runner was built with. A runner bakes them in at
+// construction, so a call with different ones — e.g. after the workspace is
+// moved in Settings, which updates paths without a restart — must not get the
+// old runner back, or node output keeps landing in the previous folder.
+const registryArgs = new Map<string, string>()
+
+function canReuseRunner(extensionId: string, args: string[]): boolean {
+  const key = JSON.stringify(args)
+  if (registry.has(extensionId) && registryArgs.get(extensionId) === key) return true
+  terminateProcessRunner(extensionId)
+  registryArgs.set(extensionId, key)
+  return false
+}
 
 export function getProcessRunner(
   extensionId:  string,
@@ -326,7 +339,7 @@ export function getProcessRunner(
   workspaceDir: string,
   tempDir:      string,
 ): ProcessRunner {
-  if (!registry.has(extensionId)) {
+  if (!canReuseRunner(extensionId, [extDir, entry, workspaceDir, tempDir])) {
     registry.set(extensionId, new ProcessRunner(extDir, entry, workspaceDir, tempDir))
   }
   return registry.get(extensionId)! as ProcessRunner
@@ -340,7 +353,7 @@ export function getPythonProcessRunner(
   workspaceDir: string,
   tempDir:      string,
 ): PythonProcessRunner {
-  if (!registry.has(extensionId)) {
+  if (!canReuseRunner(extensionId, [pythonExe, extDir, entry, workspaceDir, tempDir])) {
     registry.set(extensionId, new PythonProcessRunner(pythonExe, extDir, entry, workspaceDir, tempDir))
   }
   return registry.get(extensionId)! as PythonProcessRunner
