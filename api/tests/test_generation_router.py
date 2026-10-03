@@ -42,6 +42,9 @@ class _FakeRegistry:
         # Report loaded so _run_generation skips the download/load thread.
         return {"loaded": True, "name": "fake", "downloaded": True}
 
+    def assert_weight_variant_installed(self, params: dict, model_id=None) -> None:
+        pass
+
     def get_active(self) -> _FakeGenerator:
         return self._gen
 
@@ -103,6 +106,23 @@ class RunGenerationWorkspaceTests(unittest.TestCase):
         self.assertEqual(Path(gen.outputs_dir), registry.WORKSPACE_DIR / "MyColl")
         self.assertEqual(job.status, "done")
         self.assertEqual(job.output_url, "/workspace/MyColl/model.glb")
+
+    def test_missing_weight_variant_fails_the_job_before_generation(self) -> None:
+        class _MissingVariantRegistry(_FakeRegistry):
+            def assert_weight_variant_installed(self, params: dict, model_id=None) -> None:
+                raise RuntimeError(f'{params["gguf_quant"]} weights for trellis2/generate are not installed.')
+
+        gen = _FakeGenerator()
+        generation.generator_registry = _MissingVariantRegistry(gen)
+        job_id = "job-missing-variant"
+        generation._jobs[job_id] = JobStatus(job_id=job_id, status="pending", progress=0)
+        generation._cancel_events[job_id] = threading.Event()
+        asyncio.run(generation._run_generation(job_id, b"img", {"gguf_quant": "Q6_K"}, "MyColl"))
+
+        job = generation._jobs[job_id]
+        self.assertEqual(job.status, "error")
+        self.assertIn("Q6_K weights for trellis2/generate are not installed", job.error)
+        self.assertIsNone(gen.outputs_dir)
 
 
 class GenerateFromImageWorkspaceTests(unittest.TestCase):

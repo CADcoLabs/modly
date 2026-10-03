@@ -135,6 +135,7 @@ class WorkflowRunJobLifecycleTests(unittest.TestCase):
                 ids = ("demo/workflow", "demo/generate")
                 self.generators = {model_id: Generator(model_id) for model_id in ids}
                 self.active_id = "demo/generate"
+            def assert_weight_variant_installed(self, params, model_id=None): pass
             def get_generator(self, model_id): return self.generators[model_id]
             def get_manifest(self, model_id): return {"output": "mesh"}
             def model_status(self, model_id):

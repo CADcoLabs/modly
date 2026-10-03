@@ -26,10 +26,12 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 from services.generators.base import BaseGenerator
 from services.extension_process import ExtensionProcess, _venv_python
 from services.model_sources import (
+    missing_weight_variant,
     model_sources_are_downloaded,
     normalize_model_sources,
     normalize_weight_group_references,
     normalize_weight_groups,
+    normalize_weight_variants,
     validate_model_node_ids,
     resolve_weight_group_root,
     safe_source_id,
@@ -62,6 +64,17 @@ _REGISTRATION_CAPABILITY_LOCK = threading.Lock()
 print(f"[Registry] MODELS_DIR     = {MODELS_DIR}")
 print(f"[Registry] WORKSPACE_DIR  = {WORKSPACE_DIR}")
 print(f"[Registry] EXTENSIONS_DIR = {EXTENSIONS_DIR or '(not set)'}")
+
+
+def is_within_workspace(resolved_path: Path) -> bool:
+    """True when an already-resolved path is the current workspace or inside it.
+
+    Compares ancestry, not string prefixes: ``startswith`` would also accept a
+    sibling folder such as ``<workspace>-other``. Reads WORKSPACE_DIR at call
+    time, since moving the workspace rebinds it.
+    """
+    workspace = WORKSPACE_DIR.resolve()
+    return resolved_path == workspace or workspace in resolved_path.parents
 
 
 # ------------------------------------------------------------------ #
@@ -484,6 +497,11 @@ def _discover_extensions(
                         weight_groups,
                         field_name=f"nodes[{node_id}].weight_groups",
                     )
+                    if "weight_groups" in node and "weight_variants" in node:
+                        raise ValueError(
+                            f'model node "{node_id}": weight_variants cannot be combined '
+                            "with weight_groups"
+                        )
                     if "weight_groups" in node and "hf_repo" in node:
                         raise ValueError(
                             f'model node "{node_id}" must use model_sources for private '
@@ -516,8 +534,11 @@ def _discover_extensions(
                         registration_authorization is not None
                         and registration_authorization[0] == ext_id
                         and registration_authorization[1].exists()
+                        # Normalize like the capability's destination (resolved
+                        # root + name): EXTENSIONS_DIR may be a Windows 8.3 short
+                        # path. The extension folder itself is not resolved.
                         and registration_authorization[2]
-                        == Path(os.path.abspath(ext_dir))
+                        == Path(os.path.abspath(ext_dir.parent.resolve() / ext_dir.name))
                     )
                 )
             )
@@ -583,6 +604,9 @@ def _discover_extensions(
                         weight_groups,
                         field_name=f"nodes[{node['id']}].weight_groups",
                     ) or []
+                    weight_variants = normalize_weight_variants(
+                        node, node.get("params_schema", manifest.get("params_schema", []))
+                    )
                     node_manifest = {
                         **manifest,
                         "id":               f"{ext_id}/{node['id']}",
@@ -601,6 +625,8 @@ def _discover_extensions(
                     }
                     if model_sources is not None:
                         node_manifest["model_sources"] = model_sources
+                    if weight_variants is not None:
+                        node_manifest["weight_variants"] = weight_variants
                     full_id = f"{ext_id}/{node['id']}"
                     result[full_id] = (cls_or_None, node_manifest, ext_dir, legacy_context)
                     if subprocess_mode:
@@ -822,6 +848,25 @@ class GeneratorRegistry:
             "downloaded": self._is_downloaded(model_id, gen),
             "loaded": gen.is_loaded(),
         }
+
+    def assert_weight_variant_installed(
+        self, params: dict, model_id: Optional[str] = None
+    ) -> None:
+        """Refuse generation when the weight variant selected by params is not installed.
+
+        ``model_id`` is the job's model. Pinned jobs only switch to it once they
+        run, so the active model is not a reliable stand-in before that.
+        """
+        target_id = model_id or self._active_id
+        manifest = self._manifests.get(target_id, {})
+        option = missing_weight_variant(
+            MODELS_DIR, target_id, manifest.get("weight_variants"), params
+        )
+        if option is not None:
+            raise RuntimeError(
+                f'{option["label"]} weights for {target_id} are not installed. '
+                "Install them from the Extensions page, or select an installed variant."
+            )
 
     def get_generator(self, model_id: str) -> BaseGenerator:
         self._assert_not_quarantined(model_id)

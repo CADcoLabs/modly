@@ -480,3 +480,30 @@ test('managed model node ids reject portable aliases before installation', () =>
     assert.throws(() => validateInstallManifest(manifest, opts, 'test'), /portable-unique/)
   }
 })
+
+test('validateInstallManifest validates weight variants and keeps them off process nodes', () => {
+  const mod = loadModule()
+  const files = { hasEntryFile: () => true, hasGeneratorFile: () => true }
+  const weightVariants = {
+    param: 'quant',
+    options: [{ id: 'Q4', include_prefixes: ['dit/model_Q4.gguf'], checks: ['dit/model_Q4.gguf'] }],
+  }
+  const paramsSchema = [{ id: 'quant', type: 'select', options: [{ value: 'Q4' }] }]
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'quantized', generator_class: 'Generator', params_schema: paramsSchema,
+    nodes: [{ id: 'generate', hf_repo: 'org/model', weight_variants: weightVariants }],
+  }, files, 'repository'))
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'quantized', generator_class: 'Generator',
+    nodes: [{ id: 'generate', hf_repo: 'org/model', weight_variants: weightVariants }],
+  }, files, 'repository'), /must name a params_schema entry/)
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'quantized', generator_class: 'Generator', params_schema: paramsSchema,
+    nodes: [{ id: 'generate', weight_variants: weightVariants }],
+  }, files, 'repository'), /requires hf_repo/)
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'proc', type: 'process', entry: 'processor.js',
+    nodes: [{ id: 'run', hf_repo: 'org/model', weight_variants: weightVariants }],
+  }, files, 'repository'), /weight_variants is supported only for model nodes/)
+})
+

@@ -2,9 +2,11 @@ import {
   normalizeModelSources,
   normalizeWeightGroupReferences,
   normalizeWeightGroups,
+  normalizeWeightVariants,
   validateModelNodeIds,
   safeModelSourceId,
   type ModelWeightNode,
+  type WeightVariantNode,
 } from './model-sources'
 
 export interface InstallManifest {
@@ -13,6 +15,7 @@ export interface InstallManifest {
   entry?: string
   generator_class?: string
   model_sources?: unknown
+  params_schema?: unknown
   weight_groups?: unknown
   nodes?: Array<{
     id?: string
@@ -22,7 +25,8 @@ export interface InstallManifest {
     hf_repo?: unknown
     model_sources?: unknown
     weight_groups?: unknown
-  } & ModelWeightNode>
+    weight_variants?: unknown
+  } & ModelWeightNode & WeightVariantNode>
 }
 
 export interface ValidatedInstallManifest {
@@ -90,12 +94,18 @@ export function validateInstallManifest(
     if (usesSharedWeights && typeof node.id === 'string' && node.id.toLowerCase() === '_shared') {
       throw new Error('manifest.json: model node id "_shared" is reserved')
     }
+    if (isProcess && node.weight_variants !== undefined) {
+      throw new Error('manifest.json: weight_variants is supported only for model nodes')
+    }
     if (isProcess && (node.model_sources !== undefined || node.weight_groups !== undefined)) {
       throw new Error('manifest.json: model_sources and weight_groups are supported only for model nodes')
     }
-    if (!usesSharedWeights && node.model_sources === undefined) continue
+    if (!usesSharedWeights && node.model_sources === undefined && node.weight_variants === undefined) continue
     const nodeId = safeModelSourceId(node.id, 'model node id')
     if (node.model_sources !== undefined) normalizeModelSources(node)
+    // Before the weight_groups/hf_repo check, so a variants + groups node gets
+    // the explicit "cannot be combined" error.
+    normalizeWeightVariants(node, node.params_schema ?? manifest.params_schema)
     normalizeWeightGroupReferences(node, weightGroups, `nodes[${nodeId}].weight_groups`)
     if (node.weight_groups !== undefined && node.hf_repo !== undefined) {
       throw new Error(

@@ -21,6 +21,7 @@ class _Registry:
     def get_generator(self, model_id): return object()
     def get_manifest(self, model_id): return {"input": "scene"}
     def switch_model(self, model_id): self.switched = True
+    def assert_weight_variant_installed(self, params, model_id=None): pass
 
 
 class SceneGenerationTests(unittest.TestCase):
@@ -87,6 +88,7 @@ class SceneGenerationTests(unittest.TestCase):
 
         generator = Generator()
         registry_stub = type("Registry", (), {
+            "assert_weight_variant_installed": lambda self, params, model_id=None: None,
             "model_status": lambda self, model_id: {"name": model_id, "downloaded": True, "loaded": True},
             "get_generator": lambda self, model_id: generator if model_id == "demo/a" else (_ for _ in ()).throw(ValueError(f"Unknown model ID: {model_id}")),
             "activate_ready_generator": lambda self, model_id: generator if model_id == "demo/a" else (_ for _ in ()).throw(ValueError(f"Unknown model ID: {model_id}")),
@@ -105,6 +107,7 @@ class SceneGenerationTests(unittest.TestCase):
 
     def test_missing_pinned_model_fails_actionably(self):
         registry_stub = type("Registry", (), {
+            "assert_weight_variant_installed": lambda self, params, model_id=None: None,
             "model_status": lambda self, model_id: {"name": model_id, "downloaded": True, "loaded": False},
             "get_generator": lambda self, model_id: object(),
             "activate_ready_generator": lambda self, model_id: (_ for _ in ()).throw(ValueError(f"Unknown model ID: {model_id}")),
@@ -159,6 +162,7 @@ class SceneGenerationTests(unittest.TestCase):
             def __init__(self):
                 self.generators = {model_id: Generator(model_id) for model_id in ("demo/a", "demo/b")}
                 self.active_id = "demo/a"
+            def assert_weight_variant_installed(self, params, model_id=None): pass
             def get_generator(self, model_id): return self.generators[model_id]
             def model_status(self, model_id):
                 gen = self.generators[model_id]
@@ -235,6 +239,7 @@ class SceneGenerationTests(unittest.TestCase):
 
         generator = Generator()
         registry_stub = type("Registry", (), {
+            "assert_weight_variant_installed": lambda self, params, model_id=None: None,
             "get_generator": lambda self, model_id: generator,
             "model_status": lambda self, model_id: {
                 "name": model_id, "downloaded": True, "loaded": True,
@@ -293,6 +298,7 @@ class SceneGenerationTests(unittest.TestCase):
 
         generator = Generator()
         registry_stub = type("Registry", (), {
+            "assert_weight_variant_installed": lambda self, params, model_id=None: None,
             "get_generator": lambda self, model_id: generator,
             "model_status": lambda self, model_id: {
                 "name": model_id, "downloaded": True, "loaded": True,

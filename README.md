@@ -207,6 +207,73 @@ Shared groups are installed through their dependent nodes; the drawer exposes
 shared-group status and explicit removal. Removing private node data never removes a shared group;
 shared-group removal is a separate action that identifies every affected node.
 
+### Separately installable weight variants
+
+A model node that publishes the same weights in several variants (quantizations,
+precisions…) can declare `weight_variants` next to `hf_repo`. The Extensions page
+lists every variant under the node, and each one is downloaded or deleted on its own.
+
+```json
+{
+  "id": "generate",
+  "hf_repo": "org/model-gguf",
+  "download_check": "pipeline.json",
+  "hf_include_prefixes": ["pipeline.json", "encoder/", "dit/"],
+  "params_schema": [
+    {
+      "id": "quant",
+      "label": "Quantization",
+      "type": "select",
+      "default": "Q5_K_M",
+      "options": [
+        { "value": "Q4_K_M", "label": "Q4_K_M" },
+        { "value": "Q5_K_M", "label": "Q5_K_M" }
+      ]
+    }
+  ],
+  "weight_variants": {
+    "param": "quant",
+    "default": "Q5_K_M",
+    "options": [
+      {
+        "id": "Q4_K_M",
+        "label": "Q4_K_M",
+        "size_gb": 2.4,
+        "vram_gb": 6,
+        "include_prefixes": ["dit/model_Q4_K_M.gguf"],
+        "checks": ["dit/model_Q4_K_M.gguf"]
+      },
+      {
+        "id": "Q5_K_M",
+        "include_prefixes": ["dit/model_Q5_K_M.gguf"],
+        "checks": ["dit/model_Q5_K_M.gguf"]
+      }
+    ]
+  }
+}
+```
+
+- `param` names the `params_schema` select whose values are the variant ids. That
+  param must exist on the node (or on the extension, as its fallback), and when it
+  declares `options` they must cover every variant id.
+- `size_gb` (download size) and `vram_gb` (approximate VRAM the variant needs) are
+  optional positive numbers, shown next to the variant when present.
+- Every install downloads the shared files (`hf_include_prefixes`, with every
+  variant's files excluded automatically) plus one variant: the one asked for, or the
+  `default` one — the first option when `default` is omitted. Files already complete
+  on disk are skipped, so adding a second variant only fetches that variant.
+  Only declared variants are excluded from the shared pass: keep
+  `hf_include_prefixes` narrow enough that a variant the repository publishes but
+  the manifest does not declare (e.g. an extra `dit/model_Q8_0.gguf`) is not
+  downloaded with every install.
+- A variant is installed when all of its `checks` exist; the node is installed once
+  its `download_check` and at least one variant are present.
+- Generation fails with an explicit message when the selected variant is not
+  installed, and the node's selector labels those options `(not installed)`.
+- `include_prefixes` and `checks` are safe POSIX paths relative to the node's model
+  directory. Prefixes of two variants cannot overlap, `download_check` stays outside
+  every variant, and `weight_variants` cannot be combined with `model_sources`.
+
 ---
 
 ## Workflows

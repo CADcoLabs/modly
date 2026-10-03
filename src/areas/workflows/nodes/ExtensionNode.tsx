@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useLayoutEffect, useState } from 'react'
 import { Handle, Position, useReactFlow } from '@xyflow/react'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
+import { useNavStore } from '@shared/stores/navStore'
 import { buildAllWorkflowExtensions } from '../mockExtensions'
 import type { ParamSchema } from '../mockExtensions'
 import type { WFNodeData } from '@shared/types/electron.d'
 import { PICKER_LABELS, openParamPicker, resolvePickerIntent } from '@shared/utils/paramPicker'
 import { FloatInput, IntInput, PickerIcon } from '@shared/components/ui'
+import { isMissingWeightVariant, withWeightVariantAvailability } from '@shared/utils/weightVariants'
 import { useWorkflowRunStore } from '../workflowRunStore'
 import BaseNode from './BaseNode'
 
@@ -121,8 +123,10 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
   const [handleTops, setHandleTops] = useState<string[]>([])
 
   const { modelExtensions, processExtensions } = useExtensionsStore()
+  const installedVariants = useExtensionsStore((s) => (data.extensionId ? s.installedWeightVariants[data.extensionId] : undefined))
   const allExtensions = buildAllWorkflowExtensions(modelExtensions, processExtensions)
   const ext = allExtensions.find((e) => e.id === data.extensionId)
+  const openExtension = useNavStore((s) => s.openExtension)
 
   const inputs      = ext?.inputs  // defined → multi-input mode
   const isMulti     = inputs && inputs.length > 1
@@ -267,7 +271,21 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
                 <div key={param.id} className="flex items-center gap-2">
                   <label className="text-[10px] text-zinc-500 w-24 shrink-0 leading-tight">{param.label}</label>
                   <div className="flex-1">
-                    <ParamControl param={param} value={val} onChange={(v) => patchParam(param.id, v)} resolvedParams={resolvedParams} />
+                    <ParamControl
+                      param={withWeightVariantAvailability(param, ext?.weightVariants, installedVariants)}
+                      value={val}
+                      onChange={(v) => patchParam(param.id, v)}
+                      resolvedParams={resolvedParams}
+                    />
+                    {/* Offer the install instead of leaving the graph on selection. */}
+                    {ext && isMissingWeightVariant(param.id, val, ext.weightVariants, installedVariants) && (
+                      <button
+                        onClick={() => openExtension(ext.extensionId)}
+                        className="nodrag mt-1 text-[10px] text-amber-400 hover:text-amber-300 hover:underline"
+                      >
+                        Not installed — install it
+                      </button>
+                    )}
                   </div>
                 </div>
               )
