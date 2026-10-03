@@ -13,9 +13,9 @@ import { createRequire } from 'node:module'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import vm from 'node:vm'
 
 function loadModule() {
-  const outfile = join(mkdtempSync(join(tmpdir(), 'modly-runner-test-')), 'process-runner.cjs')
   const require = createRequire(import.meta.url)
   const result = buildSync({
     entryPoints: [resolve('electron/main/process-runner.ts')],
@@ -23,9 +23,17 @@ function loadModule() {
     platform: 'node',
     format: 'cjs',
     write: false,
+    external: ['electron'],
   })
-  writeFileSync(outfile, result.outputFiles[0].text, 'utf8')
-  return require(outfile)
+  // process-runner imports electron's `app` (the Python runner reads it when it
+  // spawns); the real package cannot load outside Electron, so hand it a stub.
+  const app = { isPackaged: false, getAppPath: () => process.cwd() }
+  const module = { exports: {} }
+  const dependencies = (name) => (name === 'electron' ? { app } : require(name))
+  vm.runInNewContext(result.outputFiles[0].text, {
+    module, exports: module.exports, require: dependencies, process, console, Buffer, setTimeout, clearTimeout,
+  })
+  return module.exports
 }
 
 // A JS process extension that reports the workspace it was given, plus how many
