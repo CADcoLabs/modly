@@ -9,41 +9,113 @@ import { SseProgressBar } from '@shared/components/ui/SseProgressBar'
 import { ModelLibraryModal } from '@shared/components/ui/ModelLibraryModal'
 import type { LlmModel } from '@shared/stores/llmModelsStore'
 import { formatBytes } from '@shared/utils/format'
+import { Section, Card, SegmentedControl } from '@shared/ui'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }): JSX.Element {
+/** A labelled block inside a Card, for controls that need the full width. */
+function Block({ label, description, hint, action, children }: {
+  label?: string
+  description?: string
+  hint?: string
+  action?: React.ReactNode
+  children?: React.ReactNode
+}): JSX.Element {
   return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-[12px] font-medium text-zinc-300">{label}</label>
+    <div className="px-4 py-3 flex flex-col gap-2">
+      {(label || action) && (
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            {label && <p className="text-xs font-medium text-zinc-300">{label}</p>}
+            {description && <p className="text-[11px] text-zinc-500 mt-0.5">{description}</p>}
+          </div>
+          {action && <div className="shrink-0">{action}</div>}
+        </div>
+      )}
       {children}
-      {hint && <p className="text-[11px] text-zinc-600">{hint}</p>}
+      {hint && <p className="text-[11px] text-zinc-500 leading-relaxed">{hint}</p>}
     </div>
   )
 }
 
-function Group({ title, badge, children }: { title: string; badge?: React.ReactNode; children: React.ReactNode }): JSX.Element {
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-2">
-        <h3 className="text-[11px] font-semibold uppercase tracking-widest text-zinc-500">{title}</h3>
-        {badge}
-      </div>
-      {children}
-    </div>
-  )
-}
-
-function Badge({ tone, children }: { tone: 'ok' | 'warn' | 'muted'; children: React.ReactNode }): JSX.Element {
-  const cls = tone === 'ok'
-    ? 'bg-emerald-500/15 text-emerald-400'
+function Badge({ tone, children }: { tone: 'accent' | 'warn' | 'muted'; children: React.ReactNode }): JSX.Element {
+  const cls = tone === 'accent'
+    ? 'bg-accent/15 text-accent-light border-accent/30'
     : tone === 'warn'
-      ? 'bg-amber-500/15 text-amber-400'
-      : 'bg-zinc-700/40 text-zinc-400'
-  return <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${cls}`}>{children}</span>
+      ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+  const dot = tone === 'accent' ? 'bg-accent-light' : tone === 'warn' ? 'bg-amber-400' : null
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[10.5px] font-medium ${cls}`}>
+      {dot && <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />}
+      {children}
+    </span>
+  )
 }
 
-const inputCls = 'bg-zinc-900 border border-zinc-700/60 rounded-lg px-3 py-2 text-[12.5px] text-zinc-200 focus:outline-none focus:border-zinc-500'
+function CopyButton({ text }: { text: string }): JSX.Element {
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const t = setTimeout(() => setCopied(false), 1500)
+    return () => clearTimeout(t)
+  }, [copied])
+  return (
+    <button
+      onClick={() => { void navigator.clipboard.writeText(text); setCopied(true) }}
+      className="inline-flex items-center gap-1.5 text-[11px] text-zinc-500 hover:text-zinc-200 transition-colors"
+    >
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="9" y="9" width="13" height="13" rx="2" />
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+      </svg>
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  )
+}
+
+function StepTitle({ n, children }: { n: number; children: React.ReactNode }): JSX.Element {
+  return (
+    <p className="text-xs font-medium text-zinc-300">
+      <span className="mr-2 text-accent-light">{n}</span>{children}
+    </p>
+  )
+}
+
+const inputCls = 'w-full bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-accent/50'
+const secondaryBtnCls = 'px-2.5 py-1 rounded-md text-[11px] font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors disabled:opacity-50'
+const primaryBtnCls = 'px-3 py-1.5 rounded-lg bg-accent hover:bg-accent-dark text-white text-xs font-medium transition-colors'
+
+type McpClient = 'claude' | 'codex' | 'opencode'
+
+const MCP_CLIENTS: { value: McpClient; label: string; path: string; config: string }[] = [
+  {
+    value:  'claude',
+    label:  'Claude Desktop',
+    path:   '~/.config/claude/claude_desktop_config.json',
+    config: `{\n  "mcpServers": {\n    "modly": {\n      "command": "modly-mcp"\n    }\n  }\n}`,
+  },
+  {
+    value:  'codex',
+    label:  'Codex CLI',
+    path:   '~/.codex/config.toml',
+    config: `[mcp_servers.modly]\ncommand = "modly-mcp"`,
+  },
+  {
+    value:  'opencode',
+    label:  'OpenCode',
+    path:   '~/.config/opencode/config.json',
+    config: `{\n  "$schema": "https://opencode.ai/config.json",\n  "mcp": {\n    "modly": {\n      "type": "local",\n      "command": ["modly-mcp"]\n    }\n  }\n}`,
+  },
+]
+
+const MCP_INSTALL = 'npm install -g modly-cli-mcp'
+
+const THINKING_OPTIONS: { value: ThinkingMode; label: string; desc: string }[] = [
+  { value: 'auto', label: 'Auto',     desc: 'The model decides whether to think' },
+  { value: 'on',   label: 'Enabled',  desc: 'Forces thinking on every response' },
+  { value: 'off',  label: 'Disabled', desc: 'Disables thinking (faster responses)' },
+]
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -72,6 +144,8 @@ export function AgentSection(): JSX.Element {
   const [extModels, setExtModels]         = useState<string[]>([])
   const [extTesting, setExtTesting]       = useState(false)
   const [extResult, setExtResult]         = useState<'ok' | 'error' | null>(null)
+
+  const [mcpClient, setMcpClient] = useState<McpClient>('claude')
 
   const refreshLocal = useCallback(async () => {
     try {
@@ -160,270 +234,245 @@ export function AgentSection(): JSX.Element {
     }
   }
 
-  const THINKING_OPTIONS: { value: ThinkingMode; label: string; desc: string }[] = [
-    { value: 'auto', label: 'Auto',     desc: 'The model decides whether to think' },
-    { value: 'on',   label: 'Enabled',  desc: 'Forces thinking on every response' },
-    { value: 'off',  label: 'Disabled', desc: 'Disables thinking (faster responses)' },
-  ]
-
-  const mcpConfigs = {
-    opencode: `{\n  "$schema": "https://opencode.ai/config.json",\n  "mcp": {\n    "modly": {\n      "type": "local",\n      "command": ["modly-mcp"]\n    }\n  }\n}`,
-    codex: `[mcp_servers.modly]\ncommand = "modly-mcp"`,
-    claude: `{\n  "mcpServers": {\n    "modly": {\n      "command": "modly-mcp"\n    }\n  }\n}`,
-  }
+  const selectedModel = models.find((m) => m.id === localModel)
+  const client        = MCP_CLIENTS.find((c) => c.value === mcpClient) ?? MCP_CLIENTS[0]
 
   return (
-    <div className="flex flex-col gap-8 max-w-xl">
-      <div>
-        <h2 className="text-[18px] font-semibold text-zinc-100 mb-1">Agent</h2>
-        <p className="text-[12px] text-zinc-500">Configure the LLM powering the chat — fully local by default.</p>
-      </div>
+    <Section title="Agent" subtitle="Configure the LLM powering the chat — fully local by default.">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
 
-      {/* Provider */}
-      <Group title="Provider">
-        <Field label="LLM provider" hint="Local runs entirely on this machine via llama.cpp. External providers require an API key.">
-          <select
-            value={provider}
-            onChange={(e) => setProvider(e.target.value as ProviderId)}
-            className={inputCls}
-          >
-            {(Object.keys(PROVIDERS) as ProviderId[]).map((p) => (
-              <option key={p} value={p}>{PROVIDERS[p].label}</option>
-            ))}
-          </select>
-        </Field>
-      </Group>
+        {/* ── Left column ── */}
+        <div className="flex flex-col gap-4 min-w-0">
 
-      {provider === 'local' ? (
-        <Group
-          title="Local engine (llama.cpp)"
-          badge={
-            engineInstalled === null ? <Badge tone="muted">API unreachable</Badge>
-              : engineInstalled ? <Badge tone="ok">Engine installed</Badge>
-              : <Badge tone="warn">Engine missing</Badge>
-          }
-        >
-          {engineInstalled === false && (
-            <div className="flex flex-col gap-2">
-              {engineInstall ? (
-                <SseProgressBar event={engineInstall} />
-              ) : (
-                <button
-                  onClick={() => void installEngine()}
-                  className="self-start px-3.5 py-2 rounded-lg bg-accent hover:bg-accent-dark text-white text-[12px] font-medium transition-colors"
-                >
-                  Install engine
-                </button>
-              )}
-              {engineError && <p className="text-[11px] text-red-400">{engineError}</p>}
-            </div>
-          )}
-          {engineInstalled === null && (
-            <button
-              onClick={() => void refreshLocal()}
-              className="self-start px-3 py-2 rounded-lg border border-zinc-700/60 bg-zinc-900 text-[12px] text-zinc-400 hover:text-zinc-200 hover:border-zinc-500 transition-colors"
-            >
-              Retry
-            </button>
-          )}
-
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <label className="text-[12px] font-medium text-zinc-300">Models</label>
-              <button
-                onClick={() => setShowLibrary(true)}
-                className="px-3 py-1.5 rounded-lg border border-zinc-700/60 bg-zinc-900 text-[12px] text-zinc-300 hover:text-white hover:border-zinc-500 transition-colors"
+          <Card title="Provider" description="Which model answers in the chat.">
+            <Block label="LLM provider" hint="Local runs entirely on this machine via llama.cpp. External providers require an API key.">
+              <select
+                value={provider}
+                onChange={(e) => setProvider(e.target.value as ProviderId)}
+                className={`${inputCls} cursor-pointer`}
               >
-                Browse
-              </button>
-            </div>
-            {models.length === 0 ? (
-              <p className="text-[11px] text-zinc-600">No model yet — open Browse to add or download one.</p>
-            ) : (
-              <ul className="border border-zinc-800 rounded-xl bg-zinc-900/40 divide-y divide-zinc-800">
-                {/* The agent's selected model first, so it is what you see on closing Browse. */}
-                {[...models].sort((a, b) => Number(b.id === localModel) - Number(a.id === localModel)).map((m) => (
-                  <li key={m.id} className="px-4 py-2.5 flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="text-[12.5px] text-zinc-200 truncate">{m.name}</span>
-                      {m.id === localModel && <Badge tone="ok">Selected</Badge>}
-                    </div>
-                    {m.size_bytes ? <span className="shrink-0 text-[11px] text-zinc-500">{formatBytes(m.size_bytes)}</span> : null}
-                  </li>
+                {(Object.keys(PROVIDERS) as ProviderId[]).map((p) => (
+                  <option key={p} value={p}>{PROVIDERS[p].label}</option>
                 ))}
-              </ul>
-            )}
-          </div>
+              </select>
+            </Block>
+          </Card>
 
-          <Field
-            label="Simultaneous models"
-            hint="How many local models may stay loaded at once (one llama-server process each). Auto sizes it from your GPU's VRAM — on 8 GB cards keep 1 so 3D generation always has room."
-          >
-            <select
-              value={maxModels}
-              onChange={(e) => void changeMaxModels(e.target.value)}
-              className={inputCls}
+          {provider === 'local' ? (
+            <Card
+              title="Local engine"
+              description="llama.cpp runtime and the models it can load."
+              aside={
+                engineInstalled === null ? <Badge tone="muted">API unreachable</Badge>
+                  : engineInstalled ? <Badge tone="accent">Engine installed</Badge>
+                  : <Badge tone="warn">Engine missing</Badge>
+              }
             >
-              <option value="auto">
-                Auto{resolvedMax != null ? ` — ${resolvedMax} model${resolvedMax > 1 ? 's' : ''}${vramGb != null ? ` (${vramGb} GB VRAM)` : ''}` : ''}
-              </option>
-              {[1, 2, 3, 4].map((n) => (
-                <option key={n} value={String(n)}>{n}</option>
-              ))}
-            </select>
-          </Field>
-        </Group>
-      ) : (
-        <Group title={PROVIDERS[provider].label}>
-          {provider === 'custom' && (
-            <Field label="Base URL" hint="Any OpenAI-compatible endpoint (llama-server, vLLM, LM Studio…). Without the trailing /chat/completions.">
-              <input
-                value={baseUrlDraft}
-                onChange={(e) => { setBaseUrlDraft(e.target.value); setExtResult(null) }}
-                placeholder="http://192.168.1.20:8080/v1"
-                className={inputCls}
-              />
-            </Field>
+              {engineInstalled === false && (
+                <Block>
+                  {engineInstall ? (
+                    <SseProgressBar event={engineInstall} />
+                  ) : (
+                    <button onClick={() => void installEngine()} className={`self-start ${primaryBtnCls}`}>
+                      Install engine
+                    </button>
+                  )}
+                  {engineError && <p className="text-[11px] text-red-400">{engineError}</p>}
+                </Block>
+              )}
+              {engineInstalled === null && (
+                <Block>
+                  <button onClick={() => void refreshLocal()} className={`self-start ${secondaryBtnCls}`}>Retry</button>
+                </Block>
+              )}
+
+              <Block
+                label="Models"
+                description="GGUF weights available to the agent."
+                action={<button onClick={() => setShowLibrary(true)} className={secondaryBtnCls}>Browse…</button>}
+              >
+                {selectedModel ? (
+                  <div className="flex items-center gap-3 px-3 py-2 rounded-lg bg-surface-500 border border-zinc-800">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-zinc-500 shrink-0">
+                      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                      <polyline points="3.27 6.96 12 12.01 20.73 6.96" /><line x1="12" y1="22.08" x2="12" y2="12" />
+                    </svg>
+                    <div className="min-w-0 flex-1 flex items-baseline gap-2">
+                      <span className="text-xs font-medium text-zinc-200 truncate">{selectedModel.name}</span>
+                      <span className="text-[10px] text-zinc-500 font-mono truncate">
+                        {[
+                          selectedModel.size_bytes ? formatBytes(selectedModel.size_bytes) : null,
+                          selectedModel.quant,
+                          selectedModel.vram_estimate_mb ? `~${(selectedModel.vram_estimate_mb / 1000).toFixed(1)} GB VRAM` : null,
+                        ].filter(Boolean).join(' · ')}
+                      </span>
+                    </div>
+                    <Badge tone="accent">In use</Badge>
+                  </div>
+                ) : (
+                  <p className="px-3 py-2 rounded-lg bg-surface-500 border border-zinc-800 text-[11px] text-zinc-500">
+                    {models.length === 0
+                      ? 'No model yet — open Browse… to add or download one.'
+                      : 'No model selected — open Browse… and select one.'}
+                  </p>
+                )}
+              </Block>
+
+              <Block
+                label="Simultaneous models"
+                hint="How many local models may stay loaded at once (one llama-server process each). Auto sizes it from your GPU's VRAM — on 8 GB cards keep 1 so 3D generation always has room."
+              >
+                <select
+                  value={maxModels}
+                  onChange={(e) => void changeMaxModels(e.target.value)}
+                  className={`${inputCls} cursor-pointer`}
+                >
+                  <option value="auto">
+                    Auto{resolvedMax != null ? ` — ${resolvedMax} model${resolvedMax > 1 ? 's' : ''}${vramGb != null ? ` (${vramGb} GB VRAM)` : ''}` : ''}
+                  </option>
+                  {[1, 2, 3, 4].map((n) => (
+                    <option key={n} value={String(n)}>{n}</option>
+                  ))}
+                </select>
+              </Block>
+            </Card>
+          ) : (
+            <Card title={PROVIDERS[provider].label} description="Connection used for the chat.">
+              {provider === 'custom' && (
+                <Block label="Base URL" hint="Any OpenAI-compatible endpoint (llama-server, vLLM, LM Studio…). Without the trailing /chat/completions.">
+                  <input
+                    value={baseUrlDraft}
+                    onChange={(e) => { setBaseUrlDraft(e.target.value); setExtResult(null) }}
+                    placeholder="http://192.168.1.20:8080/v1"
+                    className={inputCls}
+                  />
+                </Block>
+              )}
+
+              <Block
+                label={PROVIDERS[provider].noKey ? 'API key (optional)' : 'API key'}
+                hint={PROVIDERS[provider].noKey
+                  ? 'Not needed for a local Ollama — models already pulled with it are reused as-is.'
+                  : 'Stored locally on this machine only.'}
+              >
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    value={keyDraft}
+                    onChange={(e) => { setKeyDraft(e.target.value); setExtResult(null) }}
+                    placeholder={PROVIDERS[provider].noKey ? '' : 'sk-…'}
+                    className={inputCls}
+                  />
+                  <button onClick={handleTestExternal} disabled={extTesting} className={`shrink-0 ${secondaryBtnCls}`}>
+                    {extTesting ? 'Testing…' : 'Test'}
+                  </button>
+                </div>
+                {extResult === 'ok' && (
+                  <p className="text-[11px] text-emerald-400">Connected — {extModels.length} model{extModels.length > 1 ? 's' : ''} available</p>
+                )}
+                {extResult === 'error' && (
+                  <p className="text-[11px] text-red-400">
+                    {provider === 'ollama'
+                      ? 'Could not list models — is Ollama running?'
+                      : `Could not list models — check the key${provider === 'custom' ? ' and URL' : ''}`}
+                  </p>
+                )}
+              </Block>
+
+              <Block label="Model" hint="Model name used for the chat.">
+                {extModels.length > 0 ? (
+                  <select value={extModelDraft} onChange={(e) => setExtModelDraft(e.target.value)} className={`${inputCls} cursor-pointer`}>
+                    {/* Without it the browser shows the first model while the draft
+                      * stays '' — Save then persisted an empty model name. */}
+                    {!extModelDraft && <option value="" disabled>Select a model…</option>}
+                    {!extModels.includes(extModelDraft) && extModelDraft && <option value={extModelDraft}>{extModelDraft}</option>}
+                    {extModels.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    value={extModelDraft}
+                    onChange={(e) => setExtModelDraft(e.target.value)}
+                    placeholder={provider === 'anthropic' ? 'claude-sonnet-5' : provider === 'openai' ? 'gpt-5.2' : provider === 'ollama' ? 'qwen2.5:3b' : 'model name'}
+                    className={inputCls}
+                  />
+                )}
+              </Block>
+
+              <Block>
+                <button onClick={saveExternal} className={`self-start ${primaryBtnCls}`}>Save</button>
+              </Block>
+            </Card>
           )}
 
-          <Field
-            label={PROVIDERS[provider].noKey ? 'API key (optional)' : 'API key'}
-            hint={PROVIDERS[provider].noKey
-              ? 'Not needed for a local Ollama — models already pulled with it are reused as-is.'
-              : 'Stored locally on this machine only.'}
-          >
-            <div className="flex gap-2">
-              <input
-                type="password"
-                value={keyDraft}
-                onChange={(e) => { setKeyDraft(e.target.value); setExtResult(null) }}
-                placeholder={PROVIDERS[provider].noKey ? '' : 'sk-…'}
-                className={`${inputCls} flex-1`}
-              />
-              <button
-                onClick={handleTestExternal}
-                disabled={extTesting}
-                className="px-3 py-2 rounded-lg border border-zinc-700/60 bg-zinc-900 text-[12px] text-zinc-400 hover:text-zinc-200 hover:border-zinc-500 transition-colors disabled:opacity-50 shrink-0"
-              >
-                {extTesting ? 'Testing…' : 'Test'}
-              </button>
-            </div>
-            {extResult === 'ok' && (
-              <p className="text-[11px] text-emerald-400">Connected — {extModels.length} model{extModels.length > 1 ? 's' : ''} available</p>
-            )}
-            {extResult === 'error' && (
-              <p className="text-[11px] text-red-400">
-                {provider === 'ollama'
-                  ? 'Could not list models — is Ollama running?'
-                  : `Could not list models — check the key${provider === 'custom' ? ' and URL' : ''}`}
-              </p>
-            )}
-          </Field>
-
-          <Field label="Model" hint="Model name used for the chat.">
-            {extModels.length > 0 ? (
-              <select value={extModelDraft} onChange={(e) => setExtModelDraft(e.target.value)} className={inputCls}>
-                {/* Without it the browser shows the first model while the draft
-                  * stays '' — Save then persisted an empty model name. */}
-                {!extModelDraft && <option value="" disabled>Select a model…</option>}
-                {!extModels.includes(extModelDraft) && extModelDraft && <option value={extModelDraft}>{extModelDraft}</option>}
-                {extModels.map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
-            ) : (
-              <input
-                value={extModelDraft}
-                onChange={(e) => setExtModelDraft(e.target.value)}
-                placeholder={provider === 'anthropic' ? 'claude-sonnet-5' : provider === 'openai' ? 'gpt-5.2' : provider === 'ollama' ? 'qwen2.5:3b' : 'model name'}
-                className={inputCls}
-              />
-            )}
-          </Field>
-
-          <button
-            onClick={saveExternal}
-            className="self-start px-4 py-2 rounded-lg bg-accent hover:bg-accent-dark text-white text-[12px] font-medium transition-colors"
-          >
-            Save
-          </button>
-        </Group>
-      )}
-
-      {/* Thinking */}
-      <Group title="Thinking">
-        <Field label="Default mode" hint="Can be changed on the fly in the chat via the brain icon.">
-          <div className="flex flex-col gap-2">
-            {THINKING_OPTIONS.map((opt) => (
-              <label key={opt.value} className="flex items-start gap-3 cursor-pointer group">
-                <div className="mt-0.5">
+          <Card title="Thinking" description="Default mode — can be changed on the fly in the chat via the brain icon.">
+            <div className="px-4 py-3 flex flex-col gap-3">
+              {THINKING_OPTIONS.map((opt) => (
+                <label key={opt.value} className="flex items-start gap-3 cursor-pointer group">
                   <input
                     type="radio"
                     name="thinking"
                     value={opt.value}
                     checked={defaultThinking === opt.value}
                     onChange={() => setDefaultThinking(opt.value)}
-                    className="accent-violet-500"
+                    className="mt-0.5 accent-violet-500"
                   />
-                </div>
-                <div>
-                  <p className="text-[12.5px] text-zinc-200 group-hover:text-white transition-colors">{opt.label}</p>
-                  <p className="text-[11px] text-zinc-600">{opt.desc}</p>
-                </div>
-              </label>
-            ))}
-          </div>
-        </Field>
-      </Group>
-
-      {/* MCP */}
-      <Group title="MCP Server">
-        <p className="text-[12px] text-zinc-400 leading-relaxed">
-          Install this community package (made by <span className="text-zinc-300">DrHepa</span>) to control Modly from Claude Desktop, Codex or OpenCode:
-        </p>
-        <div className="relative">
-          <pre className="bg-zinc-900 border border-zinc-700/60 rounded-lg px-4 py-3 text-[11px] text-zinc-400">npm install -g modly-cli-mcp</pre>
-          <button
-            onClick={() => navigator.clipboard.writeText('npm install -g modly-cli-mcp')}
-            title="Copier"
-            className="absolute top-2 right-2 text-zinc-600 hover:text-zinc-300 transition-colors"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" />
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-            </svg>
-          </button>
-        </div>
-
-        <div className="flex flex-col gap-3">
-          {([
-            { label: 'Claude Desktop', key: 'claude'   as const, hint: '~/.config/claude/claude_desktop_config.json' },
-            { label: 'Codex CLI',      key: 'codex'    as const, hint: '~/.codex/config.toml' },
-            { label: 'OpenCode',       key: 'opencode' as const, hint: '~/.config/opencode/config.json' },
-          ] as const).map(({ label, key, hint }) => (
-            <div key={key}>
-              <p className="text-[11px] text-zinc-500 mb-1.5">{label} <span className="text-zinc-700">— {hint}</span></p>
-              <div className="relative">
-                <pre className="bg-zinc-900 border border-zinc-700/60 rounded-lg px-4 py-3 text-[11px] text-zinc-400 overflow-x-auto leading-relaxed whitespace-pre">
-                  {mcpConfigs[key]}
-                </pre>
-                <button
-                  onClick={() => navigator.clipboard.writeText(mcpConfigs[key])}
-                  title="Copier"
-                  className="absolute top-2 right-2 text-zinc-600 hover:text-zinc-300 transition-colors"
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="9" y="9" width="13" height="13" rx="2" />
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                  </svg>
-                </button>
-              </div>
+                  <div>
+                    <p className="text-xs font-medium text-zinc-300 group-hover:text-zinc-100 transition-colors">{opt.label}</p>
+                    <p className="text-[11px] text-zinc-500">{opt.desc}</p>
+                  </div>
+                </label>
+              ))}
             </div>
-          ))}
+          </Card>
         </div>
-      </Group>
+
+        {/* ── Right column ── */}
+        <div className="flex flex-col gap-4 min-w-0">
+          <Card
+            title="MCP server"
+            description={<>Control Modly from Claude Desktop, Codex or OpenCode. Community package by <span className="text-zinc-300">DrHepa</span>.</>}
+            aside={<Badge tone="muted">Community</Badge>}
+          >
+            <Block>
+              <StepTitle n={1}>Install the package</StepTitle>
+              <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-surface-500 border border-zinc-800">
+                <code className="text-[11px] font-mono text-zinc-300 truncate">
+                  <span className="text-zinc-600 mr-2">$</span>{MCP_INSTALL}
+                </code>
+                <CopyButton text={MCP_INSTALL} />
+              </div>
+            </Block>
+
+            <Block>
+              <StepTitle n={2}>Add it to your client</StepTitle>
+              <div>
+                <SegmentedControl
+                  value={mcpClient}
+                  onChange={setMcpClient}
+                  options={MCP_CLIENTS.map(({ value, label }) => ({ value, label }))}
+                  ariaLabel="MCP client"
+                />
+              </div>
+              <div className="rounded-lg bg-surface-500 border border-zinc-800 overflow-hidden">
+                <div className="flex items-center justify-between gap-3 px-3 py-2 border-b border-zinc-800/80">
+                  <p className="text-[11px] text-zinc-300 truncate">
+                    {client.label}
+                    <span className="ml-2 font-mono text-[10px] text-zinc-600">{client.path}</span>
+                  </p>
+                  <CopyButton text={client.config} />
+                </div>
+                <pre className="px-3 py-3 text-[11px] font-mono text-zinc-400 leading-relaxed overflow-x-auto whitespace-pre">
+                  {client.config}
+                </pre>
+              </div>
+            </Block>
+          </Card>
+        </div>
+      </div>
 
       {showLibrary && (
         <ModelLibraryModal onClose={() => { setShowLibrary(false); void refreshLocal() }} />
       )}
-    </div>
+    </Section>
   )
 }
