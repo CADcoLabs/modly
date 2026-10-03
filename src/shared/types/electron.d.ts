@@ -209,6 +209,11 @@ declare global {
         get: () => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }>
         set: (patch: { modelsDir?: string; workspaceDir?: string; workflowsDir?: string; extensionsDir?: string; hfToken?: string }) => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }>
       }
+      /** decrypt returns null when the stored blob can't be decrypted here. */
+      secureStore: {
+        encrypt: (plainText: string) => Promise<string>
+        decrypt: (stored: string) => Promise<string | null>
+      }
       cache: {
         clear: () => Promise<{ success: boolean; error?: string }>
       }

@@ -103,6 +103,14 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:readScreenshotDataUrl', filename) as Promise<string>,
     },
 
+    // Secure storage — OS-level encryption for secrets (API keys, …)
+    secureStore: {
+      encrypt: (plainText: string): Promise<string> => ipcRenderer.invoke('secure:encrypt', plainText) as Promise<string>,
+      // null = one of our blobs that couldn't be decrypted here (different OS
+      // user/machine). Never the ciphertext — see secure-store.ts.
+      decrypt: (stored: string): Promise<string | null> => ipcRenderer.invoke('secure:decrypt', stored) as Promise<string | null>,
+    },
+
     // Settings
     settings: {
       get: (): Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }> =>

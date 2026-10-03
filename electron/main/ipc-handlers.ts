@@ -84,6 +84,8 @@ import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-se
 import { updatesSupported } from './updater'
 import { ModelWeightOperations } from './model-weight-operations'
 import { readLocalFileBase64 } from './bounded-file-reader'
+import { encryptSecret, decryptSecret } from './secure-store'
+import { getHfToken, initHfToken, setHfToken } from './hf-token'
 
 type WindowGetter = () => BrowserWindow | null
 const pExecFile = promisify(execFile)
@@ -242,6 +244,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       return []
     }
   })
+
+  // Secure storage — OS-level encryption (Keychain/DPAPI/libsecret) for secrets
+  // the renderer would otherwise have to keep in plain-text localStorage (API keys).
+  ipcMain.handle('secure:encrypt', (_, plainText: string) => encryptSecret(plainText))
+  ipcMain.handle('secure:decrypt', (_, stored: string) => decryptSecret(stored))
 
   // Window controls (frameless window)
   ipcMain.on('window:minimize', () => getWindow()?.minimize())
@@ -837,36 +844,40 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     arch:      process.arch,
   }))
 
-  // Settings — seed HF token into main-process env at startup
+  // Settings — decrypt the HF token (migrating a legacy plaintext one) and seed
+  // it into the main-process env at startup.
   {
-    const initialToken = getSettings(app.getPath('userData')).hfToken ?? ''
-    if (initialToken) {
-      process.env['HUGGING_FACE_HUB_TOKEN'] = initialToken
-      process.env['HF_TOKEN']               = initialToken
+    const token = initHfToken(app.getPath('userData'))
+    if (token) {
+      process.env['HUGGING_FACE_HUB_TOKEN'] = token
+      process.env['HF_TOKEN']               = token
     }
   }
 
   ipcMain.handle('settings:get', () => {
-    return getSettings(app.getPath('userData'))
+    // hfToken is stored encrypted — hand the renderer the usable value.
+    return { ...getSettings(app.getPath('userData')), hfToken: getHfToken() }
   })
 
   ipcMain.handle('settings:set', async (_event, patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string; hfToken?: string }) => {
     if (patch.modelsDir !== undefined && weightOperations.busy) {
       throw new Error('Cannot change model storage while model weights are busy')
     }
-    const updated = setSettings(app.getPath('userData'), patch)
+    const { hfToken, ...dirs } = patch
+    setSettings(app.getPath('userData'), dirs)
     // Keep main-process env in sync so child processes spawned after token change inherit it
-    if (patch.hfToken !== undefined) {
-      process.env['HUGGING_FACE_HUB_TOKEN'] = patch.hfToken
-      process.env['HF_TOKEN']               = patch.hfToken
+    if (hfToken !== undefined) {
+      setHfToken(app.getPath('userData'), hfToken)
+      process.env['HUGGING_FACE_HUB_TOKEN'] = hfToken
+      process.env['HF_TOKEN']               = hfToken
       // Also push the token into the live FastAPI process env so extension
       // subprocesses spawned by ExtensionProcess._build_env() pick it up
       // without requiring a full app restart.
       try {
-        await axios.post(`${API_BASE_URL}/settings/hf-token`, { token: patch.hfToken }, { timeout: 3000 })
+        await axios.post(`${API_BASE_URL}/settings/hf-token`, { token: hfToken }, { timeout: 3000 })
       } catch { /* FastAPI may not be running yet — ignore */ }
     }
-    return updated
+    return { ...getSettings(app.getPath('userData')), hfToken: getHfToken() }
   })
 
   // Directory picker
