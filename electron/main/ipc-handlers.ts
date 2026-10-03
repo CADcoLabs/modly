@@ -1,8 +1,8 @@
 import { ipcMain, BrowserWindow, Notification, dialog, app, shell } from 'electron'
 import { buildSync } from 'esbuild'
 import { autoUpdater } from 'electron-updater'
-import { join } from 'path'
-import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp, symlink, lstat } from 'fs/promises'
+import { basename, join } from 'path'
+import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp, symlink, lstat, copyFile } from 'fs/promises'
 import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
 import axios from 'axios'
 import * as tar from 'tar'
@@ -1053,6 +1053,40 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       properties: ['openFile'],
     })
     return result.canceled ? null : result.filePaths[0]
+  })
+
+  // Add a local GGUF to the agent's models folder. Picking and copying both
+  // happen here, so the renderer never hands main an arbitrary path to copy.
+  ipcMain.handle('agent:addModel', async (): Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }> => {
+    const win = getWindow()
+    if (!win) return { success: false, error: 'No window available' }
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Add a model',
+      filters: [{ name: 'GGUF model', extensions: ['gguf'] }],
+      properties: ['openFile'],
+    })
+    if (result.canceled || !result.filePaths[0]) return { success: false, cancelled: true }
+
+    const src      = result.filePaths[0]
+    const fileName = basename(src)
+    if (!fileName.toLowerCase().endsWith('.gguf')) return { success: false, error: 'Only .gguf files can be added.' }
+
+    const modelsDir = join(getSettings(app.getPath('userData')).agentDir, 'models')
+    const dest      = join(modelsDir, fileName)
+    if (existsSync(dest)) return { success: false, error: `"${fileName}" is already in your models.` }
+
+    // Copied under a temporary name first: the API lists every *.gguf in the
+    // folder, so a multi-GB copy in progress would otherwise show up as a model.
+    const partial = `${dest}.part`
+    try {
+      await mkdir(modelsDir, { recursive: true })
+      await copyFile(src, partial)
+      await rename(partial, dest)
+      return { success: true, fileName }
+    } catch (err) {
+      await rmAsync(partial, { force: true }).catch(() => {})
+      return { success: false, error: String(err) }
+    }
   })
 
   ipcMain.handle('fs:moveDirectory', async (_, { src, dest }: { src: string; dest: string }) => {

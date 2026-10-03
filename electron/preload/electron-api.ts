@@ -111,6 +111,13 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
       decrypt: (stored: string): Promise<string | null> => ipcRenderer.invoke('secure:decrypt', stored) as Promise<string | null>,
     },
 
+    // Agent — local LLM models
+    agent: {
+      // Opens a file picker and copies the chosen .gguf into the agent's models folder.
+      addModel: (): Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }> =>
+        ipcRenderer.invoke('agent:addModel') as Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }>,
+    },
+
     // Settings
     settings: {
       get: (): Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }> =>

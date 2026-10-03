@@ -221,6 +221,10 @@ declare global {
         encrypt: (plainText: string) => Promise<string>
         decrypt: (stored: string) => Promise<string | null>
       }
+      agent: {
+        /** Opens a file picker and copies the chosen .gguf into the agent's models folder. */
+        addModel: () => Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }>
+      }
       cache: {
         clear: () => Promise<{ success: boolean; error?: string }>
       }

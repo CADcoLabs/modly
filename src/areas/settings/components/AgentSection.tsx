@@ -4,7 +4,11 @@ import {
   type ThinkingMode, type ProviderId, type ExternalConfig,
 } from '@shared/stores/agentStore'
 import { useAppStore } from '@shared/stores/appStore'
-import { ModelLibraryModal, type LlmModel } from '@shared/components/ui/ModelLibraryModal'
+import { consumeSse, type SseEvent } from '@shared/services/llmDownloads'
+import { SseProgressBar } from '@shared/components/ui/SseProgressBar'
+import { ModelLibraryModal } from '@shared/components/ui/ModelLibraryModal'
+import type { LlmModel } from '@shared/stores/llmModelsStore'
+import { formatBytes } from '@shared/utils/format'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -18,13 +22,25 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   )
 }
 
-function Group({ title, children }: { title: string; children: React.ReactNode }): JSX.Element {
+function Group({ title, badge, children }: { title: string; badge?: React.ReactNode; children: React.ReactNode }): JSX.Element {
   return (
     <div className="flex flex-col gap-4">
-      <h3 className="text-[11px] font-semibold uppercase tracking-widest text-zinc-500">{title}</h3>
+      <div className="flex items-center gap-2">
+        <h3 className="text-[11px] font-semibold uppercase tracking-widest text-zinc-500">{title}</h3>
+        {badge}
+      </div>
       {children}
     </div>
   )
+}
+
+function Badge({ tone, children }: { tone: 'ok' | 'warn' | 'muted'; children: React.ReactNode }): JSX.Element {
+  const cls = tone === 'ok'
+    ? 'bg-emerald-500/15 text-emerald-400'
+    : tone === 'warn'
+      ? 'bg-amber-500/15 text-amber-400'
+      : 'bg-zinc-700/40 text-zinc-400'
+  return <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${cls}`}>{children}</span>
 }
 
 const inputCls = 'bg-zinc-900 border border-zinc-700/60 rounded-lg px-3 py-2 text-[12.5px] text-zinc-200 focus:outline-none focus:border-zinc-500'
@@ -38,8 +54,10 @@ export function AgentSection(): JSX.Element {
   } = useAgentStore()
   const apiUrl = useAppStore((s) => s.apiUrl)
 
-  // Local engine summary
+  // Local engine
   const [engineInstalled, setEngineInstalled] = useState<boolean | null>(null)
+  const [engineInstall, setEngineInstall]     = useState<SseEvent | null>(null)
+  const [engineError, setEngineError]         = useState<string | null>(null)
   const [models, setModels]                   = useState<LlmModel[]>([])
   const [showLibrary, setShowLibrary]         = useState(false)
   const [maxModels, setMaxModels]             = useState<string>('auto')
@@ -59,7 +77,7 @@ export function AgentSection(): JSX.Element {
     try {
       const [s, m, c] = await Promise.all([
         fetch(`${apiUrl}/llm/status`).then((r) => r.json()),
-        fetch(`${apiUrl}/llm/models`).then((r) => r.json()),
+        fetch(`${apiUrl}/llm/models?downloaded=true`).then((r) => r.json()),
         fetch(`${apiUrl}/llm/config`).then((r) => r.json()),
       ])
       setEngineInstalled(Boolean(s.binary_installed))
@@ -69,9 +87,24 @@ export function AgentSection(): JSX.Element {
       setVramGb(c.vram_gb ?? null)
     } catch {
       setEngineInstalled(null)
-      setModels([])
     }
   }, [apiUrl])
+
+  async function installEngine() {
+    setEngineInstall({ percent: 0, status: 'Starting…' })
+    setEngineError(null)
+    try {
+      await consumeSse(`${apiUrl}/llm/binary/install`, (e) => {
+        if (e.error) setEngineError(e.error)
+        else setEngineInstall(e)
+      })
+    } catch (e) {
+      setEngineError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setEngineInstall(null)
+      void refreshLocal()
+    }
+  }
 
   async function changeMaxModels(value: string) {
     setMaxModels(value)
@@ -127,9 +160,6 @@ export function AgentSection(): JSX.Element {
     }
   }
 
-  const downloaded    = models.filter((m) => m.downloaded)
-  const defaultEntry  = models.find((m) => m.id === localModel)
-
   const THINKING_OPTIONS: { value: ThinkingMode; label: string; desc: string }[] = [
     { value: 'auto', label: 'Auto',     desc: 'The model decides whether to think' },
     { value: 'on',   label: 'Enabled',  desc: 'Forces thinking on every response' },
@@ -165,39 +195,65 @@ export function AgentSection(): JSX.Element {
       </Group>
 
       {provider === 'local' ? (
-        <Group title="Local engine (llama.cpp)">
-          <div className="border border-zinc-800 rounded-xl px-4 py-3.5 bg-zinc-900/40 flex items-center justify-between gap-4">
-            <div className="min-w-0">
-              {engineInstalled === null ? (
-                <p className="text-[12px] text-zinc-500">Cannot reach the Modly API.</p>
+        <Group
+          title="Local engine (llama.cpp)"
+          badge={
+            engineInstalled === null ? <Badge tone="muted">API unreachable</Badge>
+              : engineInstalled ? <Badge tone="ok">Engine installed</Badge>
+              : <Badge tone="warn">Engine missing</Badge>
+          }
+        >
+          {engineInstalled === false && (
+            <div className="flex flex-col gap-2">
+              {engineInstall ? (
+                <SseProgressBar event={engineInstall} />
               ) : (
-                <>
-                  <p className="text-[12.5px] text-zinc-200 truncate">
-                    {defaultEntry ? defaultEntry.name : localModel}
-                    <span className="ml-2 text-[10px] text-zinc-600">default model</span>
-                  </p>
-                  <p className="text-[11px] mt-0.5">
-                    {!engineInstalled ? (
-                      <span className="text-amber-400">Engine not installed</span>
-                    ) : downloaded.length === 0 ? (
-                      <span className="text-amber-400">No model downloaded yet</span>
-                    ) : (
-                      <span className="text-zinc-500">{downloaded.length} model{downloaded.length > 1 ? 's' : ''} downloaded</span>
-                    )}
-                  </p>
-                </>
+                <button
+                  onClick={() => void installEngine()}
+                  className="self-start px-3.5 py-2 rounded-lg bg-accent hover:bg-accent-dark text-white text-[12px] font-medium transition-colors"
+                >
+                  Install engine
+                </button>
               )}
+              {engineError && <p className="text-[11px] text-red-400">{engineError}</p>}
             </div>
+          )}
+          {engineInstalled === null && (
             <button
-              onClick={() => setShowLibrary(true)}
-              className="shrink-0 px-3.5 py-2 rounded-lg bg-accent hover:bg-accent-dark text-white text-[12px] font-medium transition-colors"
+              onClick={() => void refreshLocal()}
+              className="self-start px-3 py-2 rounded-lg border border-zinc-700/60 bg-zinc-900 text-[12px] text-zinc-400 hover:text-zinc-200 hover:border-zinc-500 transition-colors"
             >
-              Model library
+              Retry
             </button>
+          )}
+
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <label className="text-[12px] font-medium text-zinc-300">Models</label>
+              <button
+                onClick={() => setShowLibrary(true)}
+                className="px-3 py-1.5 rounded-lg border border-zinc-700/60 bg-zinc-900 text-[12px] text-zinc-300 hover:text-white hover:border-zinc-500 transition-colors"
+              >
+                Browse
+              </button>
+            </div>
+            {models.length === 0 ? (
+              <p className="text-[11px] text-zinc-600">No model yet — open Browse to add or download one.</p>
+            ) : (
+              <ul className="border border-zinc-800 rounded-xl bg-zinc-900/40 divide-y divide-zinc-800">
+                {/* The agent's selected model first, so it is what you see on closing Browse. */}
+                {[...models].sort((a, b) => Number(b.id === localModel) - Number(a.id === localModel)).map((m) => (
+                  <li key={m.id} className="px-4 py-2.5 flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-[12.5px] text-zinc-200 truncate">{m.name}</span>
+                      {m.id === localModel && <Badge tone="ok">Selected</Badge>}
+                    </div>
+                    {m.size_bytes ? <span className="shrink-0 text-[11px] text-zinc-500">{formatBytes(m.size_bytes)}</span> : null}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
-          <p className="text-[11px] text-zinc-600">
-            Browse models by category (General, Vision), download only what you need, and pick the chat default.
-          </p>
 
           <Field
             label="Simultaneous models"
