@@ -1,9 +1,32 @@
+import {
+  normalizeModelSources,
+  normalizeWeightGroupReferences,
+  normalizeWeightGroups,
+  normalizeWeightVariants,
+  validateModelNodeIds,
+  safeModelSourceId,
+  type ModelWeightNode,
+  type WeightVariantNode,
+} from './model-sources'
+
 export interface InstallManifest {
   id?: string
   type?: 'model' | 'process'
   entry?: string
   generator_class?: string
-  nodes?: Array<{ id?: string }>
+  model_sources?: unknown
+  params_schema?: unknown
+  weight_groups?: unknown
+  nodes?: Array<{
+    id?: string
+    input?: unknown
+    inputs?: unknown
+    output?: unknown
+    hf_repo?: unknown
+    model_sources?: unknown
+    weight_groups?: unknown
+    weight_variants?: unknown
+  } & ModelWeightNode & WeightVariantNode>
 }
 
 export interface ValidatedInstallManifest {
@@ -18,6 +41,21 @@ export interface ExtensionReloadPayload {
   reloaded: true
   models: string[]
   errors: Record<string, string>
+}
+
+export function assertSupportedSceneNodeShape(
+  kind: 'model' | 'process',
+  node: { id?: string; input?: unknown; inputs?: unknown; output?: unknown },
+  declaredInputs: unknown[],
+  output: unknown,
+): void {
+  const usesSceneInput = declaredInputs.includes('scene')
+  if (kind === 'process' && (usesSceneInput || output === 'scene')) {
+    throw new Error('manifest.json: scene input and output are supported only for model nodes')
+  }
+  if (kind === 'model' && usesSceneInput && (node.inputs !== undefined || node.input !== 'scene')) {
+    throw new Error(`manifest.json: ${node.id ?? 'node'} must declare scene as its single input field`)
+  }
 }
 
 export type IncompleteInstallRecoveryAction =
@@ -38,6 +76,43 @@ export function validateInstallManifest(
   const isProcess = manifest.type === 'process'
   const entryFile = manifest.entry ?? 'processor.js'
   const nodes = Array.isArray(manifest.nodes) ? manifest.nodes.filter((node) => node?.id) : []
+  if (manifest.model_sources !== undefined) {
+    throw new Error('manifest.json: model_sources must be declared on a model node')
+  }
+  if (isProcess && manifest.weight_groups !== undefined) {
+    throw new Error('manifest.json: weight_groups is supported only for model extensions')
+  }
+  const weightGroups = normalizeWeightGroups(manifest)
+  if (weightGroups || nodes.some((node) => node.model_sources !== undefined || node.weight_groups !== undefined)) {
+    validateModelNodeIds(manifest.nodes ?? [])
+  }
+  for (const node of Array.isArray(manifest.nodes) ? manifest.nodes : []) {
+    const declaredInputs = Array.isArray(node.inputs) ? node.inputs : [node.input ?? 'image']
+    const output = node.output ?? 'mesh'
+    assertSupportedSceneNodeShape(isProcess ? 'process' : 'model', node, declaredInputs, output)
+    const usesSharedWeights = weightGroups !== undefined || node.weight_groups !== undefined
+    if (usesSharedWeights && typeof node.id === 'string' && node.id.toLowerCase() === '_shared') {
+      throw new Error('manifest.json: model node id "_shared" is reserved')
+    }
+    if (isProcess && node.weight_variants !== undefined) {
+      throw new Error('manifest.json: weight_variants is supported only for model nodes')
+    }
+    if (isProcess && (node.model_sources !== undefined || node.weight_groups !== undefined)) {
+      throw new Error('manifest.json: model_sources and weight_groups are supported only for model nodes')
+    }
+    if (!usesSharedWeights && node.model_sources === undefined && node.weight_variants === undefined) continue
+    const nodeId = safeModelSourceId(node.id, 'model node id')
+    if (node.model_sources !== undefined) normalizeModelSources(node)
+    // Before the weight_groups/hf_repo check, so a variants + groups node gets
+    // the explicit "cannot be combined" error.
+    normalizeWeightVariants(node, node.params_schema ?? manifest.params_schema)
+    normalizeWeightGroupReferences(node, weightGroups, `nodes[${nodeId}].weight_groups`)
+    if (node.weight_groups !== undefined && node.hf_repo !== undefined) {
+      throw new Error(
+        `manifest.json: model node "${nodeId}" must use model_sources for private weights when weight_groups are declared`,
+      )
+    }
+  }
 
   if (isProcess) {
     if (!opts.hasEntryFile(entryFile)) {

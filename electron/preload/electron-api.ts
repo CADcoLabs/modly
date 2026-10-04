@@ -17,7 +17,9 @@ export interface WebFrameLike {
   setZoomFactor(factor: number): void
 }
 
-export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFrameLike) {
+export type WebUtilsLike = Pick<typeof import('electron').webUtils, 'getPathForFile'>
+
+export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFrameLike, webUtils: WebUtilsLike) {
   return {
     // Window controls
     window: {
@@ -43,6 +45,12 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     // Shell utilities
     shell: { openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url) },
 
+    // Slicer integration — open a model in OrcaSlicer via its deeplink
+    slicer: {
+      open: (url: string): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke('slicer:open', url) as Promise<{ success: boolean; error?: string }>,
+    },
+
     // System info
     system: {
       memory: (): Promise<{ total: number; used: number; available: number }> =>
@@ -67,6 +75,8 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
 
     // File system dialogs + local file reading
     fs: {
+      getPathForFile:    (file: Parameters<WebUtilsLike['getPathForFile']>[0]): string =>
+        webUtils.getPathForFile(file),
       selectImage:       (): Promise<string | null> =>
         ipcRenderer.invoke('fs:selectImage') as Promise<string | null>,
       selectMeshFile:    (): Promise<string | null> =>
@@ -93,6 +103,21 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:readScreenshotDataUrl', filename) as Promise<string>,
     },
 
+    // Secure storage — OS-level encryption for secrets (API keys, …)
+    secureStore: {
+      encrypt: (plainText: string): Promise<string> => ipcRenderer.invoke('secure:encrypt', plainText) as Promise<string>,
+      // null = one of our blobs that couldn't be decrypted here (different OS
+      // user/machine). Never the ciphertext — see secure-store.ts.
+      decrypt: (stored: string): Promise<string | null> => ipcRenderer.invoke('secure:decrypt', stored) as Promise<string | null>,
+    },
+
+    // Agent — local LLM models
+    agent: {
+      // Opens a file picker and copies the chosen .gguf into the agent's models folder.
+      addModel: (): Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }> =>
+        ipcRenderer.invoke('agent:addModel') as Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }>,
+    },
+
     // Settings
     settings: {
       get: (): Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }> =>
@@ -117,12 +142,19 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     model: {
       export:         (args: { outputUrl: string; format: string }) => ipcRenderer.invoke('model:export', args),
       listDownloaded: () => ipcRenderer.invoke('model:listDownloaded'),
-      isDownloaded:   (modelId: string, downloadCheck?: string) => ipcRenderer.invoke('model:isDownloaded', modelId, downloadCheck),
-      download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[]) =>
-        ipcRenderer.invoke('model:download', { repoId, modelId, skipPrefixes, includePrefixes }),
+      isDownloaded:   (modelId: string) => ipcRenderer.invoke('model:isDownloaded', modelId),
+      hasLocalData:    (modelId: string) => ipcRenderer.invoke('model:hasLocalData', modelId),
+      sharedGroups:    (extensionId: string) => ipcRenderer.invoke('model:sharedGroups', extensionId),
+      download:       (modelId: string, variantId?: string) => (variantId === undefined
+        ? ipcRenderer.invoke('model:download', modelId)
+        : ipcRenderer.invoke('model:download', modelId, variantId)),
       pauseDownload:  (modelId: string) => ipcRenderer.invoke('model:pauseDownload', modelId),
       cancelDownload: (modelId: string) => ipcRenderer.invoke('model:cancelDownload', modelId),
       delete:         (modelId: string) => ipcRenderer.invoke('model:delete', modelId),
+      deleteSharedGroup: (extensionId: string, groupId: string) => ipcRenderer.invoke('model:deleteSharedGroup', extensionId, groupId),
+      deleteExtensionWeights: (extensionId: string) => ipcRenderer.invoke('model:deleteExtensionWeights', extensionId),
+      installedWeightVariants: (modelId: string) => ipcRenderer.invoke('model:installedWeightVariants', modelId),
+      deleteWeightVariant: (modelId: string, variantId: string) => ipcRenderer.invoke('model:deleteWeightVariant', modelId, variantId),
       unloadAll:      () => ipcRenderer.invoke('model:unloadAll'),
       showInFolder:   (modelId: string) => ipcRenderer.invoke('model:showInFolder', modelId),
       activeDownloads: (): Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]> =>
@@ -155,6 +187,8 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         }))
       },
       offProgress:    () => ipcRenderer.removeAllListeners('model:downloadProgress'),
+      onWeightsChanged: (cb: () => void) => ipcRenderer.on('model:weightsChanged', cb),
+      offWeightsChanged: () => ipcRenderer.removeAllListeners('model:weightsChanged'),
     },
 
     // App metadata

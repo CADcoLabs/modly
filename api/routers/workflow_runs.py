@@ -8,9 +8,10 @@ from pydantic import BaseModel
 from routers.generation import (
     VALID_REMESH_MODES,
     _cancel_events,
-    _cancelled,
     _jobs,
+    _purge_old_jobs,
     _run_generation,
+    cancel_job,
     sanitize_collection,
 )
 from schemas.generation import JobStatus
@@ -56,10 +57,7 @@ async def create_run_from_image(
         **model_params,
     }
 
-    # Same constraint /generate/from-image enforces on this field, checked before touching
-    # the registry below for the same reason that endpoint checks it first: switch_model()
-    # unloads whatever generator is currently active, and a request rejected for a bad
-    # remesh value should not pay for -- or force a reload after -- evicting it.
+    # Keep the same request validation as /generate/from-image before filing a job.
     if full_params["remesh"] not in VALID_REMESH_MODES:
         raise HTTPException(400, "remesh must be 'quad', 'triangle', or 'none'")
 
@@ -67,18 +65,21 @@ async def create_run_from_image(
 
     try:
         generator_registry.get_generator(model_id)
+        output_kind = generator_registry.get_manifest(model_id).get("output", "mesh")
     except ValueError as e:
         raise HTTPException(400, str(e))
-
-    generator_registry.switch_model(model_id)
 
     job_id = str(uuid.uuid4())
     image_bytes = await image.read()
 
+    _purge_old_jobs()
+
     _jobs[job_id] = JobStatus(job_id=job_id, status="pending", progress=0)
     _cancel_events[job_id] = threading.Event()
 
-    background_tasks.add_task(_run_generation, job_id, image_bytes, full_params, collection)
+    background_tasks.add_task(
+        _run_generation, job_id, image_bytes, full_params, collection, output_kind, model_id
+    )
 
     return {"run_id": job_id, "status": "pending"}
 
@@ -106,23 +107,4 @@ async def get_run(run_id: str):
 
 @router.post("/{run_id}/cancel")
 async def cancel_run(run_id: str):
-    job = _jobs.get(run_id)
-    if not job:
-        raise HTTPException(404, f"Run {run_id} not found")
-
-    _cancelled.add(run_id)
-    if run_id in _cancel_events:
-        _cancel_events[run_id].set()
-    if job.status in ("pending", "running"):
-        job.status = "cancelled"
-
-    try:
-        gen = generator_registry._generators.get(generator_registry._active_id)
-        if gen is not None and hasattr(gen, "_proc") and gen._proc and gen._proc.poll() is None:
-            gen._proc.kill()
-            gen._loaded = False
-            gen._proc = None
-    except Exception:
-        pass
-
-    return {"cancelled": True}
+    return await cancel_job(run_id)

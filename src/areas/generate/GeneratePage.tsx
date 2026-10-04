@@ -1,13 +1,14 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { useAppStore, DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
-import type { GenerationJob, LightSettings } from '@shared/stores/appStore'
+import type { GenerationJob, LightSettings, PointLight } from '@shared/stores/appStore'
 import { useApi } from '@shared/hooks/useApi'
 import { ColorPicker } from '@shared/components/ui'
 import GenerationHUD from './components/GenerationHUD'
 import Viewer3D from './components/Viewer3D'
 import WorkflowPanel from './components/WorkflowPanel'
 import { getDefaultAssetLibraryService } from './assetLibraryService'
+import { buildOrcaSlicerDeepLink, canOpenInOrcaSlicer } from './orcaSlicerLink'
 import { resolveAssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
 import {
   ASSET_LIBRARY_SORT_OPTIONS,
@@ -27,6 +28,18 @@ const MIN_WIDTH = 220
 const MAX_WIDTH = 520
 const DEFAULT_WIDTH = 320
 
+const MAX_POINT_LIGHTS = 6
+
+function createPointLight(): PointLight {
+  const angle = Math.random() * Math.PI * 2
+  return {
+    id: crypto.randomUUID(),
+    position: [Math.cos(angle) * 1.5, 0.5, Math.sin(angle) * 1.5],
+    color: '#ffffff',
+    intensity: 1,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Export dropdown
 // ---------------------------------------------------------------------------
@@ -41,9 +54,13 @@ const EXPORT_FORMATS = [
 function ExportDropdown({
   onExport,
   onClose,
+  onOpenInSlicer,
+  canOpenInSlicer,
 }: {
   onExport: (f: 'glb' | 'obj' | 'stl' | 'ply') => void
   onClose: () => void
+  onOpenInSlicer: () => void
+  canOpenInSlicer: boolean
 }) {
   return (
     <div className="absolute top-full left-0 mt-1 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl p-1 flex flex-col gap-0.5 min-w-[150px] shadow-xl">
@@ -57,6 +74,23 @@ function ExportDropdown({
           <span className="text-[10px] text-zinc-500">{desc}</span>
         </button>
       ))}
+      {canOpenInSlicer && (
+        <>
+          <div className="my-1 h-px bg-zinc-700/60" />
+          <button
+            onClick={() => { onOpenInSlicer(); onClose() }}
+            title="Convert to STL and open in OrcaSlicer"
+            className="px-3 py-2 text-left hover:bg-zinc-800 rounded-lg transition-colors flex items-center gap-2.5"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" className="text-zinc-400 shrink-0">
+              <path d="M15 3h6v6" />
+              <path d="M10 14 21 3" />
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+            </svg>
+            <span className="text-xs text-zinc-200 whitespace-nowrap">Open in OrcaSlicer</span>
+          </button>
+        </>
+      )}
     </div>
   )
 }
@@ -179,10 +213,18 @@ function LightPopover({
   settings,
   onChange,
   onClose,
+  pointLights,
+  onPointLightsChange,
+  selectedPointLightId,
+  onSelectPointLight,
 }: {
   settings: LightSettings
   onChange: (s: LightSettings) => void
   onClose: () => void
+  pointLights: PointLight[]
+  onPointLightsChange: (lights: PointLight[]) => void
+  selectedPointLightId: string | null
+  onSelectPointLight: (id: string | null) => void
 }) {
   function lightRow(
     label: string,
@@ -251,6 +293,64 @@ function LightPopover({
       {lightRow('Fill', 'fillColor', 'fillIntensity', 2)}
       {plainRow('Ambient', 'ambientIntensity', 1.5)}
       {plainRow('Environment', 'envIntensity', 2)}
+
+      {/* ── Point lights ── */}
+      <div className="border-t border-zinc-800 pt-2 mt-1 flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Point lights</p>
+          {pointLights.length < MAX_POINT_LIGHTS && (
+            <button
+              onClick={() => onPointLightsChange([...pointLights, createPointLight()])}
+              className="flex items-center gap-1 py-0.5 px-1.5 rounded text-[10px] text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              Add
+            </button>
+          )}
+        </div>
+
+        {pointLights.length === 0 && (
+          <p className="text-[10px] text-zinc-600 italic">No point lights yet.</p>
+        )}
+
+        {pointLights.map((pl) => (
+          <div
+            key={pl.id}
+            onClick={() => onSelectPointLight(pl.id)}
+            className={`flex flex-col gap-1.5 p-2 rounded-lg bg-zinc-800/40 border cursor-pointer transition-colors ${
+              pl.id === selectedPointLightId
+                ? 'border-violet-500'
+                : 'border-zinc-700/40 hover:border-zinc-600'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <ColorPicker
+                value={pl.color}
+                onChange={(c) => onPointLightsChange(pointLights.map((p) => p.id === pl.id ? { ...p, color: c } : p))}
+              />
+              <span className="text-[10px] text-zinc-400 flex-1">Point</span>
+              <span className="text-[10px] text-zinc-500 font-mono">{pl.intensity.toFixed(1)}</span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onPointLightsChange(pointLights.filter((p) => p.id !== pl.id))
+                }}
+                className="p-0.5 rounded text-zinc-600 hover:text-red-400 transition-colors"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            </div>
+            <input type="range" min={0} max={16} step={0.1} value={pl.intensity}
+              onChange={(e) => onPointLightsChange(pointLights.map((p) => p.id === pl.id ? { ...p, intensity: parseFloat(e.target.value) } : p))}
+              className="w-full h-1.5 accent-violet-500 cursor-pointer" />
+          </div>
+        ))}
+      </div>
+
       <button
         onClick={onClose}
         className="mt-1 px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
@@ -577,11 +677,14 @@ export default function GeneratePage(): JSX.Element {
   const [libraryCollapsedSectionKeys, setLibraryCollapsedSectionKeys] = useState<string[]>(() => getDefaultAssetLibraryCollapsedSectionKeys())
   const [gizmoMode, setGizmoMode] = useState<'translate' | 'rotate' | 'scale' | null>(null)
   const dragging = useRef(false)
+  const [selectedPointLightId, setSelectedPointLightId] = useState<string | null>(null)
   // Populated by Viewer3D — undoes the latest live gizmo transform, if any.
   const gizmoUndoRef = useRef<(() => boolean) | null>(null)
 
   const lightSettings = useAppStore((s) => s.lightSettings)
   const setLightSettings = useAppStore((s) => s.setLightSettings)
+  const pointLights = useAppStore((s) => s.pointLights)
+  const setPointLights = useAppStore((s) => s.setPointLights)
   const isGenerating = useAppStore((s) =>
     s.currentJob?.status === 'uploading' || s.currentJob?.status === 'generating'
   )
@@ -611,12 +714,25 @@ export default function GeneratePage(): JSX.Element {
   }, [undoMesh, redoMesh])
 
   const hasModel = currentJob?.status === 'done' && !!currentJob.outputUrl
+  const showOpenInSlicer = hasModel && canOpenInOrcaSlicer(currentJob?.outputUrl)
 
-  // Drop the active transform tool when the mesh is deselected, so it doesn't
+  // Selecting a point light (from the 3D marker or the light panel list) —
+  // also drops the active gizmo tool so it doesn't silently carry over from
+  // whatever was selected before. Switching selection directly (mesh →
+  // point light, or point light → point light) never passes through a
+  // fully-deselected state, so an effect keyed on the selection alone can't
+  // catch this; clearing it here, at the one place all of those paths go
+  // through, does.
+  const handleSelectPointLight = useCallback((id: string | null) => {
+    setSelectedPointLightId(id)
+    setGizmoMode(null)
+  }, [])
+
+  // Drop the active transform tool when nothing is selected, so it doesn't
   // silently re-activate on the next selection.
   useEffect(() => {
-    if (!meshSelected) setGizmoMode(null)
-  }, [meshSelected])
+    if (!meshSelected && !selectedPointLightId) setGizmoMode(null)
+  }, [meshSelected, selectedPointLightId])
 
   // Gizmo hotkeys: W move, R rotate, S scale, Esc exits. Ignored while typing.
   useEffect(() => {
@@ -624,7 +740,7 @@ export default function GeneratePage(): JSX.Element {
       const el = document.activeElement as HTMLElement | null
       if (el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable)) return
       if (e.key === 'Escape') { setGizmoMode((m) => (m ? null : m)); return }
-      if (!hasModel || !meshSelected) return
+      if (!meshSelected && !selectedPointLightId) return
       const k = e.key.toLowerCase()
       if (k === 'w') setGizmoMode('translate')
       else if (k === 'r') setGizmoMode('rotate')
@@ -632,7 +748,7 @@ export default function GeneratePage(): JSX.Element {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [hasModel, meshSelected])
+  }, [hasModel, meshSelected, selectedPointLightId])
 
   useEffect(() => {
     if (openPanel !== 'library' || libraryLoaded || libraryLoading) return
@@ -658,6 +774,21 @@ export default function GeneratePage(): JSX.Element {
     }
     link.download = `${stem}.${format}`
     link.click()
+  }
+
+  async function handleOpenInOrcaSlicer() {
+    if (!currentJob?.outputUrl) return
+    try {
+      const link = buildOrcaSlicerDeepLink(apiUrl, currentJob.outputUrl)
+      const result = await window.electron.slicer.open(link)
+      if (!result.success) {
+        // Deliberately not "make sure it is installed": the main process cannot
+        // tell a missing OrcaSlicer from a working one (see slicer:open).
+        showError(result.error ?? 'Could not open OrcaSlicer.')
+      }
+    } catch (err) {
+      showError(err instanceof Error ? err.message : 'Could not open OrcaSlicer.')
+    }
   }
 
   function getOptimizePath(url: string): string {
@@ -971,6 +1102,8 @@ export default function GeneratePage(): JSX.Element {
                   <ExportDropdown
                     onExport={handleExport as (f: 'glb' | 'obj' | 'stl' | 'ply') => void}
                     onClose={() => setOpenPanel(null)}
+                    onOpenInSlicer={() => { void handleOpenInOrcaSlicer() }}
+                    canOpenInSlicer={showOpenInSlicer}
                   />
                 )}
               </div>
@@ -1073,6 +1206,10 @@ export default function GeneratePage(): JSX.Element {
                 settings={lightSettings}
                 onChange={setLightSettings}
                 onClose={() => setOpenPanel(null)}
+                pointLights={pointLights}
+                onPointLightsChange={setPointLights}
+                selectedPointLightId={selectedPointLightId}
+                onSelectPointLight={handleSelectPointLight}
               />
             )}
           </div>
@@ -1080,7 +1217,7 @@ export default function GeneratePage(): JSX.Element {
 
         {/* Tools bar — always visible; transform tools appear once a mesh is selected */}
         <div className="flex items-center gap-2 px-3 h-10 border-b border-zinc-800 bg-surface-400 shrink-0">
-          {hasModel && meshSelected && (
+          {(meshSelected || selectedPointLightId) && (
             <>
               <ToolButton
                 label="Move"
@@ -1124,7 +1261,15 @@ export default function GeneratePage(): JSX.Element {
 
         {/* Viewer area */}
         <div className="flex-1 relative overflow-hidden">
-          <Viewer3D lightSettings={lightSettings} gizmoMode={gizmoMode} gizmoUndoRef={gizmoUndoRef} />
+          <Viewer3D
+            lightSettings={lightSettings}
+            gizmoMode={gizmoMode}
+            gizmoUndoRef={gizmoUndoRef}
+            pointLights={pointLights}
+            selectedPointLightId={selectedPointLightId}
+            onSelectPointLight={handleSelectPointLight}
+            onPointLightsChange={setPointLights}
+          />
           <GenerationHUD />
         </div>
       </div>

@@ -1,8 +1,8 @@
 import { ipcMain, BrowserWindow, Notification, dialog, app, shell } from 'electron'
 import { buildSync } from 'esbuild'
 import { autoUpdater } from 'electron-updater'
-import { join } from 'path'
-import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp, symlink, lstat } from 'fs/promises'
+import { basename, join } from 'path'
+import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp, symlink, lstat, copyFile } from 'fs/promises'
 import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
 import axios from 'axios'
 import * as tar from 'tar'
@@ -13,7 +13,34 @@ import {
   isModelDownloaded,
   listDownloadedModels,
   downloadModelFromHF,
+  downloadModelSourcesFromHF,
+  type DownloadProgress,
 } from './model-downloader'
+import {
+  legacyDownloadSteps,
+  resolveInstalledExtensionSharedWeightGroups,
+  resolveInstalledModelDownloadPlan,
+} from './model-download-plan'
+import {
+  areModelSourcesDownloaded,
+  areModelSourcesDownloadedAtRoot,
+  areWeightGroupSourcesDownloaded,
+  installedWeightVariants,
+  listWeightVariantFiles,
+  modelHasLocalData,
+  normalizeModelSources,
+  normalizeWeightGroupReferences,
+  normalizeWeightGroups,
+  normalizeWeightVariants,
+  validateModelNodeIds,
+  removePartialDownloadArtifacts,
+  resolveExtensionModelRoot,
+  resolveModelRoot,
+  resolveWeightGroupRoot,
+  resolveWeightStorageRoot,
+  safeModelSourceId,
+  weightStorageHasLocalData,
+} from './model-sources'
 import { getSettings, setSettings } from './settings-store'
 import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensureSslPatch } from './python-setup'
 import { logger } from './logger'
@@ -30,6 +57,8 @@ import {
   isInternalExtensionDirName,
   resolveExtensionPathWithinRoot,
 } from './extension-path-guard'
+import { detectGpuInfo, describeGpuInfo, torchFlavorFor, type GpuInfo } from './gpu-detect'
+import { SETUP_LAUNCHER_SOURCE } from './setup-launcher'
 import {
   assertCompatibleExtensionUpdateType,
   expectedModelIds,
@@ -38,6 +67,7 @@ import {
   validateExtensionReloadPayload,
   validateExistingExtensionReplacement,
   validateInstallManifest,
+  assertSupportedSceneNodeShape,
 } from './extension-install-utils'
 import {
   beginExtensionRegistrationTransaction,
@@ -56,65 +86,20 @@ import {
 } from './extension-install-recovery'
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
 import { updatesSupported } from './updater'
+import { ModelWeightOperations } from './model-weight-operations'
+import { readLocalFileBase64 } from './bounded-file-reader'
+import { encryptSecret, decryptSecret } from './secure-store'
+import { getHfToken, initHfToken, setHfToken } from './hf-token'
 
 type WindowGetter = () => BrowserWindow | null
 const pExecFile = promisify(execFile)
 
-// ─── GPU detect (best-effort, no Python required) ─────────────────────────────
-
-interface GpuInfo {
-  sm: number
-  cudaVersion: number
-  accelerator: 'cuda' | 'mps' | 'cpu'
-}
-
-function detectGpuInfo(): Promise<GpuInfo> {
-  if (process.platform === 'darwin' && process.arch === 'arm64') {
-    return Promise.resolve({ sm: 0, cudaVersion: 0, accelerator: 'mps' })
-  }
-
-  return new Promise((resolve) => {
-    // Query compute cap + driver version in one call
-    const proc = spawn('nvidia-smi', ['--query-gpu=compute_cap,driver_version', '--format=csv,noheader'], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-    let out = ''
-    proc.stdout?.on('data', (d: Buffer) => { out += d.toString() })
-    proc.on('close', (code) => {
-      if (code === 0) {
-        const line   = out.trim().split('\n')[0].trim()        // e.g. "8.6, 551.61"
-        const parts  = line.split(',').map(s => s.trim())
-        const sm     = Math.round(parseFloat(parts[0] ?? '') * 10)  // → 86
-        // Derive max supported CUDA version from driver version
-        // Driver ≥ 520 → CUDA 11.8, ≥ 525 → 12.0, ≥ 530 → 12.1, ≥ 535 → 12.2,
-        // ≥ 545 → 12.3, ≥ 550 → 12.4, ≥ 555 → 12.5, ≥ 560 → 12.6
-        const driverMajor = parseInt((parts[1] ?? '').split('.')[0] ?? '0', 10)
-        let cudaVersion = 118  // safe minimum
-        if      (driverMajor >= 570) cudaVersion = 128  // Blackwell (RTX 50xx, sm_120)
-        else if (driverMajor >= 560) cudaVersion = 126
-        else if (driverMajor >= 555) cudaVersion = 125
-        else if (driverMajor >= 550) cudaVersion = 124
-        else if (driverMajor >= 545) cudaVersion = 123
-        else if (driverMajor >= 535) cudaVersion = 122
-        else if (driverMajor >= 530) cudaVersion = 121
-        else if (driverMajor >= 525) cudaVersion = 120
-        else if (driverMajor >= 520) cudaVersion = 118
-        resolve({ sm: isNaN(sm) ? 86 : sm, cudaVersion, accelerator: 'cuda' })
-      } else {
-        resolve({ sm: 0, cudaVersion: 0, accelerator: 'cpu' })
-      }
-    })
-    proc.on('error', () => resolve({ sm: 0, cudaVersion: 0, accelerator: 'cpu' }))
-  })
-}
-
 // ─── Run an extension's setup.py directly (no FastAPI needed) ─────────────────
 
 function runExtensionSetup(
-  extDir:      string,
-  gpuSm:       number,
-  cudaVersion: number,
-  onLog?:      (line: string) => void,
+  extDir: string,
+  gpu:    GpuInfo,
+  onLog?: (line: string) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const userData  = app.getPath('userData')
@@ -128,113 +113,34 @@ function runExtensionSetup(
     const pipCacheDir = join(getSettings(userData).dependenciesDir, 'pip-cache')
     try { mkdirSync(pipCacheDir, { recursive: true }) } catch { /* pip creates it too */ }
 
-    const accelerator = process.platform === 'darwin' && process.arch === 'arm64' ? 'mps' : gpuSm > 0 ? 'cuda' : 'cpu'
+    const torchFlavor = torchFlavorFor(gpu.accelerator)
     const args = JSON.stringify({
       python_exe: pythonExe,
       ext_dir: extDir,
-      gpu_sm: gpuSm,
-      cuda_version: cudaVersion,
-      accelerator,
+      gpu_sm: gpu.sm,
+      cuda_version: gpu.cudaVersion,
+      accelerator: gpu.accelerator,
+      // Extensions that know about AMD branch on torch_flavor (the official
+      // hunyuan3d-mini one does). Those that don't get corrected by the ROCm
+      // shim in setup-launcher.ts instead.
+      torch_flavor: torchFlavor,
+      gfx_target: gpu.gfxTarget ?? '',
+      torch_index_url: gpu.torchIndexUrl ?? '',
       platform: process.platform,
       arch: process.arch,
     })
-    const launcher = `
-import runpy
-import subprocess
-import sys
-
-setup_py = sys.argv[1]
-setup_args = sys.argv[2:]
-
-_original_run = subprocess.run
-_original_check_call = subprocess.check_call
-_original_check_output = subprocess.check_output
-
-def _is_cuda_torch_index(value):
-    return isinstance(value, str) and value.startswith("https://download.pytorch.org/whl/cu")
-
-def _mentions_torch(command):
-    if not isinstance(command, (list, tuple)):
-        return False
-    return any(str(part).startswith(("torch==", "torchvision==", "torchaudio==")) for part in command)
-
-def _rewrite_command(command):
-    if sys.platform != "darwin" or not _mentions_torch(command):
-        return command
-    if not isinstance(command, (list, tuple)):
-        return command
-
-    rewritten = []
-    changed = False
-    i = 0
-    while i < len(command):
-        part = command[i]
-        text = str(part)
-        if text in ("--index-url", "-i", "--extra-index-url") and i + 1 < len(command) and _is_cuda_torch_index(str(command[i + 1])):
-            changed = True
-            i += 2
-            continue
-        if text.startswith("--index-url=") or text.startswith("--extra-index-url="):
-            value = text.split("=", 1)[1]
-            if _is_cuda_torch_index(value):
-                changed = True
-                i += 1
-                continue
-        rewritten.append(part)
-        i += 1
-
-    if changed:
-        print("[Modly setup compat] Removed CUDA-only PyTorch index on macOS; pip will use macOS wheels.", file=sys.stderr)
-        return rewritten
-    return command
-
-def _is_pip_command(command):
-    if not isinstance(command, (list, tuple)):
-        return False
-    return any("pip" in str(part).lower() for part in command[:3])
-
-def _strip_no_cache(command):
-    # Extension setup scripts often hardcode --no-cache-dir, which forces pip to
-    # re-download multi-GB wheels on every retry. Modly provides a shared cache
-    # via PIP_CACHE_DIR, so drop the flag and let pip use it.
-    if not _is_pip_command(command):
-        return command
-    if not any(str(part) == "--no-cache-dir" for part in command):
-        return command
-    print("[Modly setup compat] Removed --no-cache-dir so pip reuses the shared wheel cache.", file=sys.stderr)
-    return [part for part in command if str(part) != "--no-cache-dir"]
-
-def _transform_command(command):
-    return _strip_no_cache(_rewrite_command(command))
-
-def _patched_run(*args, **kwargs):
-    args = list(args)
-    if args:
-        args[0] = _transform_command(args[0])
-    return _original_run(*args, **kwargs)
-
-def _patched_check_call(*args, **kwargs):
-    args = list(args)
-    if args:
-        args[0] = _transform_command(args[0])
-    return _original_check_call(*args, **kwargs)
-
-def _patched_check_output(*args, **kwargs):
-    args = list(args)
-    if args:
-        args[0] = _transform_command(args[0])
-    return _original_check_output(*args, **kwargs)
-
-subprocess.run = _patched_run
-subprocess.check_call = _patched_check_call
-subprocess.check_output = _patched_check_output
-
-sys.argv = [setup_py] + setup_args
-runpy.run_path(setup_py, run_name="__main__")
-`
+    const launcher = SETUP_LAUNCHER_SOURCE
+    // The rewrite decision itself is made in gpu-detect.ts (and unit-tested
+    // there); the launcher above only applies what these carry.
     const proc = spawn(pythonExe, ['-c', launcher, setupPy, args], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env:   { ...process.env, PIP_CACHE_DIR: pipCacheDir },
+      env:   {
+        ...process.env,
+        PIP_CACHE_DIR:         pipCacheDir,
+        MODLY_TORCH_FLAVOR:    torchFlavor,
+        MODLY_TORCH_INDEX_URL: gpu.torchIndexUrl ?? '',
+        MODLY_TORCH_SPECS:     JSON.stringify(gpu.torchSpecs ?? []),
+      },
     })
 
     const handleLine = (line: string) => { if (line) onLog?.(line) }
@@ -265,7 +171,60 @@ const renameWithRetry = (from: string, to: string, label: string) =>
   renameExtensionWithRetry(from, to, label, logger)
 
 export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGetter): void {
-  const activeDownloads = new Map<string, { percent: number; file?: string; fileIndex?: number; totalFiles?: number }>()
+  type ActiveDownload = {
+    progress: DownloadProgress & { variantId?: string }
+    done: Promise<void>
+    finish: () => void
+    targetRoots: string[]
+    currentTargetId?: string
+    stopRequested?: 'pause' | 'cancel'
+  }
+  const activeDownloads = new Map<string, ActiveDownload>()
+  const weightOperations = new ModelWeightOperations()
+  // Paused/error sessions retain their original paths even after settings change.
+  const interruptedTargets = new Map<string, string[]>()
+  const notifyWeightChange = () => {
+    getWindow()?.webContents.send('model:weightsChanged')
+  }
+  // No backend listening means no Python process can hold the weight files
+  // open, so deletion is safe. A backend that answers (or times out) is not.
+  const backendUnreachable = (err: unknown): boolean => {
+    if (!axios.isAxiosError(err) || err.response) return false
+    const cause = (err as { cause?: { code?: string } }).cause
+    return err.code === 'ECONNREFUSED' || cause?.code === 'ECONNREFUSED'
+  }
+  async function unloadForRemoval(modelIds: string[]) {
+    for (const id of modelIds) {
+      try {
+        const response = await axios.post(
+          `${API_BASE_URL}/model/unload/${encodeURIComponent(id)}`, {}, { timeout: 40_000 },
+        )
+        if (response.data?.unloaded !== true) throw new Error('Model unload was not confirmed; weights were preserved')
+      } catch (err) {
+        if (backendUnreachable(err)) return
+        throw err
+      }
+    }
+  }
+  // Unload only this extension's generators, not every model in the app.
+  async function unloadExtensionForRemoval(extensionId: string) {
+    let modelIds: string[]
+    try {
+      const { data } = await axios.get<{ id: string }[]>(`${API_BASE_URL}/model/all`, { timeout: 10_000 })
+      modelIds = data.map((model) => model.id).filter((id) => id.startsWith(`${extensionId}/`))
+    } catch (err) {
+      if (backendUnreachable(err)) return
+      throw err
+    }
+    await unloadForRemoval(modelIds)
+  }
+  const resolveModelPlan = (modelId: unknown) => resolveInstalledModelDownloadPlan({
+    modelId,
+    userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+    builtinExtensionsDir: getBuiltinExtensionsDir(),
+    blockedExtensionIds: activeExtensionInstalls,
+  })
+  const LOCKED_MODEL_FILES_ERROR = 'Model files are still locked after several attempts. Close any programs using the model and try again.'
   // Logging from renderer
   ipcMain.on('log:error', (_event, message: string) => logger.error(`[Renderer] ${message}`))
   ipcMain.handle('log:getPath', () => join(app.getPath('userData'), 'logs', 'modly.log'))
@@ -296,6 +255,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       return []
     }
   })
+
+  // Secure storage — OS-level encryption (Keychain/DPAPI/libsecret) for secrets
+  // the renderer would otherwise have to keep in plain-text localStorage (API keys).
+  ipcMain.handle('secure:encrypt', (_, plainText: string) => encryptSecret(plainText))
+  ipcMain.handle('secure:decrypt', (_, stored: string) => decryptSecret(stored))
 
   // Window controls (frameless window)
   ipcMain.on('window:minimize', () => getWindow()?.minimize())
@@ -350,6 +314,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       workflowsDir:     join(baseDir, 'workflows'),
       extensionsDir:    join(baseDir, 'extensions'),
       dependenciesDir:  join(baseDir, 'dependencies'),
+      agentDir:         join(baseDir, 'agent'),
     })
   })
 
@@ -446,25 +411,59 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   ipcMain.handle('model:delete', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
-    const modelDir = join(getSettings(app.getPath('userData')).modelsDir, modelId)
-
-    // Unload the model and wait for confirmation so file handles are released
+    if (activeDownloads.has(modelId)) {
+      return { success: false, error: 'Cannot remove model weights while their download is active' }
+    }
+    let modelDir: string
     try {
-      await axios.post(`${API_BASE_URL}/model/unload/${encodeURIComponent(modelId)}`, {}, { timeout: 10_000 })
-      // Give the OS a moment to release file locks (Windows holds handles briefly after close)
-      await new Promise(resolve => setTimeout(resolve, 1_500))
-    } catch {
-      // Unload failed (model may not be loaded) — still attempt deletion
+      await resolveModelPlan(modelId)
+      modelDir = resolveModelRoot(getSettings(app.getPath('userData')).modelsDir, modelId)
+    } catch (err) {
+      return { success: false, error: String(err) }
     }
 
-    // Retry removal — Windows may return EBUSY/EPERM if handles linger
-    const removed = await rmWithRetry(modelDir, 'model-delete')
-    if (removed.ok) return { success: true }
-    return {
-      success: false,
-      error: removed.locked
-        ? 'Model files are still locked after several attempts. Close any programs using the model and try again.'
-        : String(removed.error),
+    try {
+      const removed = await weightOperations.remove(
+        [modelDir], () => unloadForRemoval([modelId]), () => rmWithRetry(modelDir, 'model-delete'),
+      )
+      notifyWeightChange()
+      return removed.ok ? { success: true } : {
+        success: false, error: removed.locked ? 'Model files are still locked. Try again after closing the model.' : String(removed.error),
+      }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('model:deleteWeightVariant', async (_, modelId: string, variantId: string): Promise<{ success: boolean; error?: string }> => {
+    if (activeDownloads.has(modelId)) {
+      return { success: false, error: 'Cannot remove model weights while their download is active' }
+    }
+    try {
+      const plan = await resolveModelPlan(modelId)
+      const variant = plan.kind === 'legacy'
+        ? plan.weightVariants?.options.find((option) => option.id === variantId)
+        : undefined
+      if (!variant) throw new Error(`Model node "${modelId}" has no weight variant "${String(variantId)}"`)
+      const modelsDir = getSettings(app.getPath('userData')).modelsDir
+      // Reserve the node root (blocks a concurrent download of any of its variants),
+      // unload with confirmation, then list and remove only this variant's files.
+      const removed = await weightOperations.remove(
+        [resolveModelRoot(modelsDir, modelId)],
+        () => unloadForRemoval([modelId]),
+        async (): Promise<Awaited<ReturnType<typeof rmWithRetry>>> => {
+          for (const file of await listWeightVariantFiles(modelsDir, modelId, variant)) {
+            const result = await rmWithRetry(file, 'model-variant-delete')
+            if (!result.ok) return result
+          }
+          return { ok: true }
+        },
+      )
+      notifyWeightChange()
+      if (removed.ok) return { success: true }
+      return { success: false, error: removed.locked ? LOCKED_MODEL_FILES_ERROR : String(removed.error) }
+    } catch (err) {
+      return { success: false, error: String(err) }
     }
   })
 
@@ -476,13 +475,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // Read local file → base64 (bypasses file:// restrictions in the renderer)
-  ipcMain.handle('fs:readFileBase64', async (_, filePath: string) => {
-    if (typeof filePath !== 'string' || filePath.trim().length === 0) {
-      throw new Error('fs:readFileBase64 requires a non-empty file path')
-    }
-    const buffer = await readFile(filePath)
-    return buffer.toString('base64')
-  })
+  ipcMain.handle('fs:readFileBase64', (_, filePath: string) => readLocalFileBase64(filePath))
 
   ipcMain.handle('fs:readScreenshotDataUrl', async (_, filename: string) => {
     const filePath = app.isPackaged
@@ -498,49 +491,273 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     return listDownloadedModels(modelsDir)
   })
 
-  ipcMain.handle('model:isDownloaded', (_, modelId: string, downloadCheck?: string): boolean => {
+  ipcMain.handle('model:isDownloaded', async (_, modelId: string): Promise<boolean> => {
     const modelsDir = getSettings(app.getPath('userData')).modelsDir
-    return isModelDownloaded(modelsDir, modelId, downloadCheck)
+    try {
+      const plan = await resolveInstalledModelDownloadPlan({
+        modelId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      if (plan.kind === 'multi-source') {
+        const privateReady = plan.sources.length === 0
+          || areModelSourcesDownloaded(modelsDir, modelId, plan.sources)
+        return privateReady && plan.sharedGroups.every((group) => (
+          areWeightGroupSourcesDownloaded(modelsDir, plan.extensionId, group)
+        ))
+      }
+      return isModelDownloaded(modelsDir, modelId, plan.downloadCheck)
+        && (!plan.weightVariants || installedWeightVariants(modelsDir, modelId, plan.weightVariants).length > 0)
+    } catch {
+      return false
+    }
+  })
+
+  // null means "unknown" (unreadable plan, or a node without variants) — the renderer
+  // must not read an empty array as "no variant installed".
+  ipcMain.handle('model:installedWeightVariants', async (_, modelId: string): Promise<string[] | null> => {
+    try {
+      const plan = await resolveModelPlan(modelId)
+      return plan.kind === 'legacy' && plan.weightVariants
+        ? installedWeightVariants(getSettings(app.getPath('userData')).modelsDir, modelId, plan.weightVariants)
+        : null
+    } catch {
+      return null
+    }
+  })
+
+  ipcMain.handle('model:hasLocalData', async (_, modelId: string): Promise<boolean> => {
+    try {
+      await resolveModelPlan(modelId)
+      return modelHasLocalData(getSettings(app.getPath('userData')).modelsDir, modelId)
+    } catch {
+      return false
+    }
+  })
+
+  ipcMain.handle('model:sharedGroups', async (_, extensionId: string) => {
+    try {
+      const groups = await resolveInstalledExtensionSharedWeightGroups({
+        extensionId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      const modelsDir = getSettings(app.getPath('userData')).modelsDir
+      return groups.map((group) => ({
+        id: group.id,
+        targetId: group.targetId,
+        dependentModelIds: group.dependentModelIds,
+        downloaded: areWeightGroupSourcesDownloaded(modelsDir, extensionId, group),
+        hasLocalData: weightStorageHasLocalData(modelsDir, group.targetId),
+      }))
+    } catch {
+      return []
+    }
+  })
+
+  ipcMain.handle('model:deleteSharedGroup', async (
+    _,
+    extensionId: string,
+    groupId: string,
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const groups = await resolveInstalledExtensionSharedWeightGroups({
+        extensionId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      const group = groups.find((candidate) => candidate.id === groupId)
+      if (!group) return { success: false, error: `Unknown shared weight group: ${groupId}` }
+      const groupRoot = resolveWeightGroupRoot(
+        getSettings(app.getPath('userData')).modelsDir,
+        extensionId,
+        group.id,
+      )
+      const removed = await weightOperations.remove(
+        [groupRoot],
+        () => unloadForRemoval(group.dependentModelIds),
+        () => rmWithRetry(groupRoot, 'shared-model-delete'),
+      )
+      notifyWeightChange()
+      if (removed.ok) return { success: true }
+      return {
+        success: false,
+        error: removed.locked
+          ? 'Shared model files are still locked. Close any programs using them and try again.'
+          : String(removed.error),
+      }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('model:deleteExtensionWeights', async (
+    _,
+    extensionId: string,
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const safeExtensionId = assertSafeExtensionId(extensionId)
+      if ([...activeDownloads.keys()].some((modelId) => modelId.split('/', 1)[0] === safeExtensionId)) {
+        return { success: false, error: 'Cannot remove extension weights while a download is active' }
+      }
+      const extensionRoot = resolveExtensionModelRoot(
+        getSettings(app.getPath('userData')).modelsDir,
+        safeExtensionId,
+      )
+      const removed = await weightOperations.remove(
+        [extensionRoot],
+        () => unloadExtensionForRemoval(safeExtensionId),
+        () => rmWithRetry(extensionRoot, 'extension-model-delete'),
+      )
+      notifyWeightChange()
+      if (removed.ok) return { success: true }
+      return {
+        success: false,
+        error: removed.locked
+          ? 'Extension model files are still locked. Close any programs using them and try again.'
+          : String(removed.error),
+      }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
   })
 
   ipcMain.handle('model:activeDownloads', () =>
-    [...activeDownloads.entries()].map(([modelId, progress]) => ({ modelId, ...progress }))
+    [...activeDownloads.entries()].map(([modelId, active]) => ({ modelId, ...active.progress }))
   )
 
   ipcMain.handle('model:download', async (
     event,
-    { repoId, modelId, skipPrefixes, includePrefixes }: { repoId: string; modelId: string; skipPrefixes?: string[]; includePrefixes?: string[] },
+    modelId: string,
+    requestedVariantId?: string | null,
   ) => {
     if (activeDownloads.has(modelId)) {
       return { success: false, error: 'Download already in progress' }
     }
-    activeDownloads.set(modelId, { percent: 0 })
+    const variantId = requestedVariantId ?? undefined
+    let plan: Awaited<ReturnType<typeof resolveInstalledModelDownloadPlan>>
+    let legacySteps: ReturnType<typeof legacyDownloadSteps> = []
     try {
-      await downloadModelFromHF(repoId, modelId, (progress) => {
-        activeDownloads.set(modelId, progress)
-        event.sender.send('model:downloadProgress', { modelId, ...progress })
-      }, skipPrefixes, includePrefixes)
+      plan = await resolveModelPlan(modelId)
+      if (plan.kind === 'multi-source') {
+        if (variantId !== undefined) throw new Error(`Model node "${modelId}" does not declare weight variants`)
+      } else {
+        // Shared files first (every variant excluded), then the requested variant.
+        legacySteps = legacyDownloadSteps(plan, variantId)
+      }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+    if (activeDownloads.has(modelId)) {
+      return { success: false, error: 'Download already in progress' }
+    }
+
+    const modelsDir = getSettings(app.getPath('userData')).modelsDir
+    const allTargets = plan.kind === 'multi-source'
+      ? [
+          ...plan.sharedGroups.map((group) => ({
+            targetId: group.targetId,
+            label: `Shared · ${group.id}`,
+            sources: group.sources,
+          })),
+          ...(plan.sources.length > 0 ? [{
+            targetId: modelId,
+            label: 'Node-specific',
+            sources: plan.sources,
+          }] : []),
+        ]
+      : []
+    const targetRoots = plan.kind === 'multi-source'
+      ? allTargets.map((target) => resolveWeightStorageRoot(modelsDir, target.targetId))
+      : [resolveModelRoot(modelsDir, modelId)]
+    let release: () => void
+    try {
+      release = weightOperations.acquire(`downloading ${modelId}`, targetRoots)
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+    const managedTargets = allTargets.filter((target) => !areModelSourcesDownloadedAtRoot(
+      resolveWeightStorageRoot(modelsDir, target.targetId), target.sources,
+    ))
+
+    let finish!: () => void
+    const done = new Promise<void>((resolveDone) => { finish = resolveDone })
+    const active: ActiveDownload = { progress: { percent: 0, variantId }, done, finish, targetRoots }
+    activeDownloads.set(modelId, active)
+    interruptedTargets.set(modelId, targetRoots)
+    try {
+      const onProgress = (progress: DownloadProgress) => {
+        active.progress = { ...progress, variantId }
+        event.sender.send('model:downloadProgress', { modelId, variantId, ...progress })
+      }
+      if (plan.kind === 'multi-source') {
+        if (managedTargets.length === 0) {
+          onProgress({ percent: 100 })
+        }
+        for (const [index, target] of managedTargets.entries()) {
+          if (active.stopRequested) throw new Error(`Model download ${active.stopRequested === 'pause' ? 'paused' : 'cancelled'}`)
+          active.currentTargetId = target.targetId
+          await downloadModelSourcesFromHF(target.targetId, target.sources, (progress) => {
+            const aggregatePercent = Math.min(
+              99,
+              Math.round(((index + progress.percent / 100) / managedTargets.length) * 100),
+            )
+            onProgress({
+              ...progress,
+              percent: aggregatePercent,
+              status: progress.status ? `${target.label} · ${progress.status}` : target.label,
+            })
+          })
+          notifyWeightChange()
+        }
+        if (active.stopRequested) throw new Error(`Model download ${active.stopRequested === 'pause' ? 'paused' : 'cancelled'}`)
+        if (managedTargets.length > 0) onProgress({ percent: 100, status: 'done' })
+      } else {
+        active.currentTargetId = modelId
+        // Shared files and the variant are separate passes sharing one 0-100 bar.
+        for (const [index, step] of legacySteps.entries()) {
+          if (active.stopRequested) throw new Error(`Model download ${active.stopRequested === 'pause' ? 'paused' : 'cancelled'}`)
+          await downloadModelFromHF(
+            plan.repoId,
+            modelId,
+            (progress) => onProgress({ ...progress, percent: Math.round((index * 100 + progress.percent) / legacySteps.length) }),
+            step.skipPrefixes,
+            step.includePrefixes,
+          )
+        }
+      }
+      interruptedTargets.delete(modelId)
       return { success: true }
     } catch (err: any) {
       const message = err?.message ?? String(err)
       if (message.includes('paused')) {
-        event.sender.send('model:downloadProgress', { modelId, percent: 0, status: 'paused', paused: true })
+        event.sender.send('model:downloadProgress', { modelId, variantId, percent: 0, status: 'paused', paused: true })
         return { success: false, paused: true }
       }
       if (message.includes('cancelled')) {
-        event.sender.send('model:downloadProgress', { modelId, percent: 0, status: 'cancelled', cancelled: true })
+        event.sender.send('model:downloadProgress', { modelId, variantId, percent: 0, status: 'cancelled', cancelled: true })
         return { success: false, cancelled: true }
       }
       return { success: false, error: String(err) }
     } finally {
-      activeDownloads.delete(modelId)
+      if (activeDownloads.get(modelId) === active) activeDownloads.delete(modelId)
+      release()
+      active.finish()
+      notifyWeightChange()
     }
   })
 
   ipcMain.handle('model:pauseDownload', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
     try {
+      const active = activeDownloads.get(modelId)
+      const targetId = active?.currentTargetId
+      if (!active || !targetId) return { success: false, error: 'No active download target' }
+      active.stopRequested = 'pause'
       await axios.post(`${API_BASE_URL}/model/hf-download/pause`, null, {
-        params: { model_id: modelId },
+        params: { model_id: targetId },
         timeout: 5000,
       })
       return { success: true }
@@ -551,17 +768,42 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('model:cancelDownload', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
     try {
-      await axios.post(`${API_BASE_URL}/model/hf-download/cancel`, null, {
-        params: { model_id: modelId },
-        timeout: 5000,
-      })
-      const modelDir = join(getSettings(app.getPath('userData')).modelsDir, modelId)
-      await rmAsync(modelDir, { recursive: true, force: true })
+      const active = activeDownloads.get(modelId)
+      if (active) active.stopRequested = 'cancel'
+      if (active?.currentTargetId) {
+        await axios.post(`${API_BASE_URL}/model/hf-download/cancel`, null, {
+          params: { model_id: active.currentTargetId },
+          timeout: 5000,
+        })
+      }
+      if (active) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          await Promise.race([
+            active.done,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error('Timed out waiting for the download to stop')), 30_000)
+            }),
+          ])
+        } finally {
+          clearTimeout(timer)
+        }
+      }
+      const roots = active?.targetRoots ?? interruptedTargets.get(modelId) ?? [resolveModelRoot(
+        getSettings(app.getPath('userData')).modelsDir, modelId,
+      )]
+      // Another sibling may have resumed these targets after our session stopped.
+      const release = weightOperations.acquire(`cancelling ${modelId}`, roots)
+      try {
+        await Promise.all(roots.map((root) => removePartialDownloadArtifacts(root)))
+        interruptedTargets.delete(modelId)
+      } finally {
+        release()
+        notifyWeightChange()
+      }
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
-    } finally {
-      activeDownloads.delete(modelId)
     }
   })
 
@@ -594,6 +836,26 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   // Shell
   ipcMain.handle('shell:openExternal', (_, url: string) => shell.openExternal(url))
+
+  // Open a model in OrcaSlicer via its orcaslicer://open?file=<url> deeplink.
+  //
+  // The returned error only covers the shell refusing the call outright. It is
+  // NOT an install check: on Windows an unregistered scheme still makes
+  // ShellExecuteEx succeed — the OS shows its own "You'll need a new app to open
+  // this orcaslicer link" dialog and this resolves with success. Detecting a
+  // missing OrcaSlicer would take a per-platform handler probe (registry on
+  // Windows), so the renderer must not promise the user that it knows.
+  ipcMain.handle('slicer:open', async (_, url: string): Promise<{ success: boolean; error?: string }> => {
+    if (typeof url !== 'string' || !url.startsWith('orcaslicer://')) {
+      return { success: false, error: 'slicer:open requires an orcaslicer:// URL' }
+    }
+    try {
+      await shell.openExternal(url)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
 
   // App info
   // System memory (used/available/total bytes).
@@ -638,33 +900,40 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     arch:      process.arch,
   }))
 
-  // Settings — seed HF token into main-process env at startup
+  // Settings — decrypt the HF token (migrating a legacy plaintext one) and seed
+  // it into the main-process env at startup.
   {
-    const initialToken = getSettings(app.getPath('userData')).hfToken ?? ''
-    if (initialToken) {
-      process.env['HUGGING_FACE_HUB_TOKEN'] = initialToken
-      process.env['HF_TOKEN']               = initialToken
+    const token = initHfToken(app.getPath('userData'))
+    if (token) {
+      process.env['HUGGING_FACE_HUB_TOKEN'] = token
+      process.env['HF_TOKEN']               = token
     }
   }
 
   ipcMain.handle('settings:get', () => {
-    return getSettings(app.getPath('userData'))
+    // hfToken is stored encrypted — hand the renderer the usable value.
+    return { ...getSettings(app.getPath('userData')), hfToken: getHfToken() }
   })
 
   ipcMain.handle('settings:set', async (_event, patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string; hfToken?: string }) => {
-    const updated = setSettings(app.getPath('userData'), patch)
+    if (patch.modelsDir !== undefined && weightOperations.busy) {
+      throw new Error('Cannot change model storage while model weights are busy')
+    }
+    const { hfToken, ...dirs } = patch
+    setSettings(app.getPath('userData'), dirs)
     // Keep main-process env in sync so child processes spawned after token change inherit it
-    if (patch.hfToken !== undefined) {
-      process.env['HUGGING_FACE_HUB_TOKEN'] = patch.hfToken
-      process.env['HF_TOKEN']               = patch.hfToken
+    if (hfToken !== undefined) {
+      setHfToken(app.getPath('userData'), hfToken)
+      process.env['HUGGING_FACE_HUB_TOKEN'] = hfToken
+      process.env['HF_TOKEN']               = hfToken
       // Also push the token into the live FastAPI process env so extension
       // subprocesses spawned by ExtensionProcess._build_env() pick it up
       // without requiring a full app restart.
       try {
-        await axios.post(`${API_BASE_URL}/settings/hf-token`, { token: patch.hfToken }, { timeout: 3000 })
+        await axios.post(`${API_BASE_URL}/settings/hf-token`, { token: hfToken }, { timeout: 3000 })
       } catch { /* FastAPI may not be running yet — ignore */ }
     }
-    return updated
+    return { ...getSettings(app.getPath('userData')), hfToken: getHfToken() }
   })
 
   // Directory picker
@@ -786,6 +1055,40 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     return result.canceled ? null : result.filePaths[0]
   })
 
+  // Add a local GGUF to the agent's models folder. Picking and copying both
+  // happen here, so the renderer never hands main an arbitrary path to copy.
+  ipcMain.handle('agent:addModel', async (): Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }> => {
+    const win = getWindow()
+    if (!win) return { success: false, error: 'No window available' }
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Add a model',
+      filters: [{ name: 'GGUF model', extensions: ['gguf'] }],
+      properties: ['openFile'],
+    })
+    if (result.canceled || !result.filePaths[0]) return { success: false, cancelled: true }
+
+    const src      = result.filePaths[0]
+    const fileName = basename(src)
+    if (!fileName.toLowerCase().endsWith('.gguf')) return { success: false, error: 'Only .gguf files can be added.' }
+
+    const modelsDir = join(getSettings(app.getPath('userData')).agentDir, 'models')
+    const dest      = join(modelsDir, fileName)
+    if (existsSync(dest)) return { success: false, error: `"${fileName}" is already in your models.` }
+
+    // Copied under a temporary name first: the API lists every *.gguf in the
+    // folder, so a multi-GB copy in progress would otherwise show up as a model.
+    const partial = `${dest}.part`
+    try {
+      await mkdir(modelsDir, { recursive: true })
+      await copyFile(src, partial)
+      await rename(partial, dest)
+      return { success: true, fileName }
+    } catch (err) {
+      await rmAsync(partial, { force: true }).catch(() => {})
+      return { success: false, error: String(err) }
+    }
+  })
+
   ipcMain.handle('fs:moveDirectory', async (_, { src, dest }: { src: string; dest: string }) => {
     try {
       await mkdir(dest, { recursive: true })
@@ -858,22 +1161,27 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     // extension type
     type?:  'model' | 'process'
     entry?: string
+    model_sources?: unknown
+    weight_groups?: unknown
     // Optional top-level fallbacks — applied to each node if not set on the node
     params_schema?:  unknown[]
     param_defaults?: Record<string, unknown>
     nodes?: {
       id:                string
       name?:             string
-      input?:            'mesh' | 'image' | 'text' | 'audio'
-      inputs?:           ('mesh' | 'image' | 'text' | 'audio')[]
+      input?:            string
+      inputs?:           string[]
       input_labels?:     string[]
-      output?:           'mesh' | 'image' | 'text' | 'audio'
+      output?:           string
       params_schema?:    unknown[]
       param_defaults?:   Record<string, unknown>
       hf_repo?:          string
       download_check?:   string
       hf_skip_prefixes?: string[]
       hf_include_prefixes?: string[]
+      model_sources?: unknown
+      weight_groups?: unknown
+      weight_variants?: unknown
     }[]
   }
 
@@ -889,26 +1197,88 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       builtin,
     }
 
-    const nodes = (parsed.nodes ?? []).map(n => ({
-      id:             n.id,
-      name:           n.name ?? n.id,
-      input:          n.input  ?? 'image' as const,
-      inputs:         n.inputs,
-      inputLabels:    n.input_labels,
-      output:         n.output ?? 'mesh'  as const,
-      paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
-      paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
-      hfRepo:         n.hf_repo,
-      downloadCheck:  n.download_check,
-      hfSkipPrefixes: n.hf_skip_prefixes,
-      hfIncludePrefixes: n.hf_include_prefixes,
-    }))
+    if (parsed.model_sources !== undefined) {
+      throw new Error('manifest.json: model_sources must be declared on a model node')
+    }
+    if (parsed.type === 'process' && parsed.weight_groups !== undefined) {
+      throw new Error('manifest.json: weight_groups is supported only for model extensions')
+    }
+    const weightGroups = normalizeWeightGroups(parsed)
+    if (weightGroups || parsed.nodes?.some((node) => node.model_sources !== undefined || node.weight_groups !== undefined)) {
+      validateModelNodeIds(parsed.nodes ?? [])
+    }
+    const nodes = (parsed.nodes ?? []).map(n => {
+      const declaredInputs = Array.isArray(n.inputs) ? n.inputs : [n.input ?? 'image']
+      const output = n.output ?? 'mesh'
+      assertSupportedSceneNodeShape(parsed.type === 'process' ? 'process' : 'model', n, declaredInputs, output)
+      const usesManagedWeights = weightGroups !== undefined
+        || n.model_sources !== undefined
+        || n.weight_groups !== undefined
+      if (weightGroups !== undefined && typeof n.id === 'string' && n.id.toLowerCase() === '_shared') {
+        throw new Error('manifest.json: model node id "_shared" is reserved')
+      }
+      const nodeId = usesManagedWeights ? safeModelSourceId(n.id, 'model node id') : n.id
+      if (parsed.type === 'process' && (n.model_sources !== undefined || n.weight_groups !== undefined)) {
+        throw new Error('manifest.json: model_sources and weight_groups are supported only for model nodes')
+      }
+      if (parsed.type === 'process' && n.weight_variants !== undefined) {
+        throw new Error('manifest.json: weight_variants is supported only for model nodes')
+      }
+      const modelSources = normalizeModelSources(n)
+      const weightVariants = normalizeWeightVariants(n, n.params_schema ?? parsed.params_schema)
+      const groupRefs = normalizeWeightGroupReferences(
+        n,
+        weightGroups,
+        `nodes[${n.id}].weight_groups`,
+      )
+      if (groupRefs && n.hf_repo !== undefined) {
+        throw new Error(
+          `manifest.json: model node "${nodeId}" must use model_sources for private weights when weight_groups are declared`,
+        )
+      }
+      return {
+        id:             nodeId,
+        name:           n.name ?? n.id,
+        input:          n.input  ?? 'image' as const,
+        inputs:         n.inputs,
+        inputLabels:    n.input_labels,
+        output:         n.output ?? 'mesh'  as const,
+        paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
+        paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
+        hfRepo:         n.hf_repo,
+        downloadCheck:  n.download_check,
+        hfSkipPrefixes: n.hf_skip_prefixes,
+        hfIncludePrefixes: n.hf_include_prefixes,
+        hasModelSources: modelSources !== undefined,
+        weightGroups: groupRefs,
+        weightVariants: weightVariants && {
+          param:   weightVariants.param,
+          default: weightVariants.default,
+          options: weightVariants.options.map((option) => ({
+            id:     option.id,
+            label:  option.label,
+            sizeGb: option.size_gb,
+            vramGb: option.vram_gb,
+          })),
+        },
+      }
+    })
 
     if (parsed.type === 'process') {
       return { ...common, type: 'process' as const, entry: parsed.entry ?? 'processor.js', nodes }
     }
 
-    return { ...common, type: 'model' as const, nodes }
+    return {
+      ...common,
+      type: 'model' as const,
+      nodes,
+      weightGroups: (weightGroups ?? []).map((group) => ({
+        id: group.id,
+        dependentNodeIds: nodes
+          .filter((node) => node.weightGroups?.includes(group.id))
+          .map((node) => node.id),
+      })),
+    }
   }
 
   async function reloadAndValidateModelExtension(
@@ -1307,8 +1677,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
           // 7a. Python process extension: run setup.py if present (same as model extensions)
           if (existsSync(join(destDir, 'setup.py'))) {
             emit({ step: 'setting_up', message: 'Setting up Python environment…' })
-            const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+            const gpu = await detectGpuInfo({ onLog: (line) => logger.info(line) })
+            logger.info(`[ext-setup] ${describeGpuInfo(gpu)}`)
+            await runExtensionSetup(destDir, gpu, (line) => {
               logger.info(`[ext-setup] ${line}`)
               emit({ step: 'setting_up', message: line })
             })
@@ -1343,8 +1714,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
           // 7c. Model extension: run setup.py directly (no FastAPI required)
           if (existsSync(join(destDir, 'setup.py'))) {
             emit({ step: 'setting_up', message: 'Setting up Python environment…' })
-            const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+            const gpu = await detectGpuInfo({ onLog: (line) => logger.info(line) })
+            logger.info(`[ext-setup] ${describeGpuInfo(gpu)}`)
+            await runExtensionSetup(destDir, gpu, (line) => {
               logger.info(`[ext-setup] ${line}`)
               emit({ step: 'setting_up', message: line })
             })
@@ -1473,6 +1845,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Uninstall an extension — built-ins cannot be uninstalled
   ipcMain.handle('extensions:uninstall', async (_, extensionId: string) => {
     try {
+      if ([...activeDownloads.keys()].some((modelId) => modelId.split('/', 1)[0] === extensionId)) {
+        return { success: false, error: 'Cannot uninstall an extension while its model download is active' }
+      }
       // Corrupted folders can carry arbitrary names (manual copies, failed
       // unzips), so only enforce root confinement for the deletion path. The
       // strict id pattern still guards the built-in check — a non-conforming
@@ -1533,7 +1908,8 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         },
         'extension folder',
       )
-      const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
+      const gpu = await detectGpuInfo({ onLog: (line) => logger.info(line) })
+      logger.info(`[ext-repair] ${describeGpuInfo(gpu)}`)
       await runExtensionRepairTransaction(
         {
           extensionsDir,
@@ -1548,8 +1924,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
           },
           setup: () => runExtensionSetup(
             extDir,
-            gpuSm,
-            cudaVersion,
+            gpu,
             (line) => logger.info(`[ext-repair] ${line}`),
           ),
           validate: async (validationCapability) => {
@@ -1807,6 +2182,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Update FastAPI paths at runtime (without restarting)
   ipcMain.handle('api:updatePaths', async (_event, patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string }) => {
     try {
+      if (patch.modelsDir !== undefined && weightOperations.busy) {
+        throw new Error('Cannot change model storage while model weights are busy')
+      }
       await axios.post(`${API_BASE_URL}/settings/paths`, {
         models_dir:     patch.modelsDir,
         workspace_dir:  patch.workspaceDir,
